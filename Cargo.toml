@@ -1,6 +1,10 @@
 [package]
-name = "alubox"
-version = "0.1.0"
-edition = "2021"
+name = "alubox"            # Nome do projeto
+version = "0.1.0"          # Versão do projeto
+edition = "2021"           # Edição do Rust usada (2021 é a mais recente com várias melhorias)
 
 [dependencies]
+    libp2p = { version = "0.52", features = ["tcp", "tls", "dns", "async-std", "noise", "yamux", "websocket", "ping", "macros"] }
+    futures = "0.3.21"
+    async-std = { version = "1.12.0", features = ["attributes"] }
+    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
