@@ -1,42 +1,50 @@
-use futures::prelude::*;
-use libp2p::swarm::SwarmEvent;
-use libp2p::{ping, Multiaddr};
-use std::error::Error;
-use std::time::Duration;
-use tracing_subscriber::EnvFilter;
+mod peer;
+mod tracker;
 
-#[async_std::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init();
+use crate::peer::{Peer, list_local_files};
+use crate::tracker::Tracker;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
-        .with_async_std()
-        .with_tcp(
-            libp2p::tcp::Config::default(),
-            libp2p::tls::Config::new,
-            libp2p::yamux::Config::default,
-        )?
-        .with_behaviour(|_| ping::Behaviour::default())?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX))) // Allows us to observe pings indefinitely.
-        .build();
+#[tokio::main]
+async fn main() {
+    let tracker = Arc::new(Tracker::new());
 
-    // Tell the swarm to listen on all interfaces and a random, OS-assigned
-    // port.
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    // Iniciar tracker em uma thread separada
+    let tracker_clone = Arc::clone(&tracker);
+    tokio::spawn(async move {
+        tracker_clone.start(6881).await.unwrap();
+    });
 
-    // Dial the peer identified by the multi-address given as the second
-    // command-line argument, if any.
-    if let Some(addr) = std::env::args().nth(1) {
-        let remote: Multiaddr = addr.parse()?;
-        swarm.dial(remote)?;
-        println!("Dialed {addr}")
-    }
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
-            SwarmEvent::Behaviour(event) => println!("{event:?}"),
-            _ => {}
+    // Criando um peer
+    let peer = Arc::new(Peer::new(
+        "127.0.0.1".to_string(),
+        6882,
+        list_local_files("shared_files"),
+    ));
+
+    peer.register_with_tracker("127.0.0.1", 6881).await.unwrap();
+
+    let peer_clone = Arc::clone(&peer);
+    tokio::spawn(async move {
+        peer_clone.start_server().await.unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    match peer.get_peers_from_tracker("127.0.0.1", 6881).await {
+        Ok(peers) => {
+            println!("Peers disponíveis: {:?}", peers);
+
+            // Supondo que você queira solicitar um arquivo específico de um peer
+            if let Some(peer_address) = peers.first() {
+                peer.request_file_from_peer(peer_address, "nome_do_arquivo_que_deseja").await.unwrap();
+            }
+        }
+        Err(e) => {
+            eprintln!("Erro ao buscar peers: {}", e);
         }
     }
 }
