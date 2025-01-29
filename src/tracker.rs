@@ -1,4 +1,4 @@
-use tokio::net::TcpListener;
+﻿use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use std::sync::Arc;
@@ -41,8 +41,17 @@ impl Tracker {
                         let response = peer_list.join(",");
                         socket.write_all(response.as_bytes()).await.unwrap();
                     }
+
+                    if request.starts_with("UNREGISTER") {
+                        let peer_info = request[11..].to_string();
+                        peers.lock().await.remove(&peer_info);
+                        println!("Peer removido: {}", peer_info);
+                    }
                 }
             });
         }
     }
+
+ 
+   
 }

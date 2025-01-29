@@ -1,6 +1,8 @@
-use tokio::net::{TcpStream, TcpListener};
+﻿use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::fs::File;
+
+
 use std::fs::read_dir;
 
 #[derive(Clone)]
@@ -8,7 +10,7 @@ pub struct Peer {
     pub ip: String,
     pub port: u16,
     pub shared_files: Vec<String>,
-    pub name: String, // Nome do peer
+    pub name: String,
 }
 
 impl Peer {
@@ -42,16 +44,15 @@ impl Peer {
         stream.write_all(b"GET_PEERS").await?;
 
         let mut buffer = [0; 1024];
-        let n = match stream.read(&mut buffer).await {
-            Ok(n) if n > 0 => n,
-            Ok(_) => return Err("Resposta vazia do tracker".into()),
-            Err(e) => return Err(format!("Erro ao ler do tracker: {:?}", e).into()),
-        };
-
+        let n = stream.read(&mut buffer).await?;
         let peer_list = String::from_utf8_lossy(&buffer[..n]).to_string();
         let peers = peer_list.split(',').map(|s| s.to_string()).collect();
         Ok(peers)
     }
+
+    
+
+    
 
     pub async fn start_server(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(format!("{}:{}", self.ip, self.port)).await?;
@@ -70,13 +71,31 @@ impl Peer {
                         let file_list = shared_files.join(",");
                         socket.write_all(file_list.as_bytes()).await.unwrap();
                     }
+                    
+                    if request.starts_with("REQUEST_FILE") {
+                        let filename = &request[13..];
+                        if let Some(file_path) = shared_files.iter().find(|f| f.as_str() == filename) {
+                            if let Ok(mut file) = File::open(file_path).await {
+                                let mut file_buffer = vec![0; 1024];
+                                while let Ok(bytes_read) = file.read(&mut file_buffer).await {
+                                    if bytes_read == 0 {
+                                        break;
+                                    }
+                                    socket.write_all(&file_buffer[..bytes_read]).await.unwrap();
+                                }
+                            }
+                        }
+                    }
+
+                    if !request.is_empty() {
+                        println!("Mensagem recebida: {}", request);
+                    }
                 }
             });
         }
     }
 }
 
-/// Lista arquivos locais
 pub fn list_local_files(directory: &str) -> Vec<String> {
     let mut files = Vec::new();
     if let Ok(entries) = read_dir(directory) {
