@@ -1,0 +1,54 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref GLOBAL_FILES: Mutex<HashMap<String, TorrentFile>> = Mutex::new(HashMap::new());
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TorrentFile {
+    pub name: String,
+    pub length: i64,
+    pub piece_length: i64,
+    pub pieces: Vec<u8>,
+}
+
+pub struct Tracker {
+    files: &'static Mutex<HashMap<String, TorrentFile>>,
+}
+
+impl Tracker {
+    pub fn new() -> Self {
+        println!("Inicializando tracker...");
+        Self {
+            files: &GLOBAL_FILES
+        }
+    }
+
+    pub fn add_file(&mut self, hash: String, file: TorrentFile) {
+        println!("Adicionando arquivo: {} (hash: {})", file.name, hash);
+        if let Ok(mut files) = self.files.lock() {
+            files.insert(hash, file);
+            println!("Total de arquivos: {}", files.len());
+        } else {
+            println!("Erro ao adicionar arquivo: mutex lock falhou");
+        }
+    }
+
+    pub fn list_files(&self) -> Vec<(String, TorrentFile)> {
+        match self.files.lock() {
+            Ok(files) => {
+                println!("Listando {} arquivo(s)", files.len());
+                files.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }
+            Err(e) => {
+                println!("Erro ao listar arquivos: {}", e);
+                vec![]
+            }
+        }
+    }
+}
