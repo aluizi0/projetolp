@@ -1,0 +1,12 @@
+C:\Users\gonca\OneDrive\Documentos\GitHub\projetolp\alubox\target\debug\deps\libsha2-8b0a748ddb249e87.rmeta: C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\lib.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\consts.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\soft.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\x86.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\soft.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\x86.rs
+
+C:\Users\gonca\OneDrive\Documentos\GitHub\projetolp\alubox\target\debug\deps\sha2-8b0a748ddb249e87.d: C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\lib.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\consts.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\soft.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\x86.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\soft.rs C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\x86.rs
+
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\lib.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\consts.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\soft.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha256\x86.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\soft.rs:
+C:\Users\gonca\.cargo\registry\src\index.crates.io-6f17d22bba15001f\sha2-0.9.9\src\sha512\x86.rs:
