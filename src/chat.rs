@@ -67,6 +67,6 @@ pub async fn start_chat_client(target_port: u16) -> Result<(), Box<dyn std::erro
 
 pub async fn message_receiver(mut receiver: mpsc::Receiver<(String, String)>) {
     while let Some((peer_name, message)) = receiver.recv().await {
-        println!(":envelope_with_arrow: Mensagem recebida de {}: {}", peer_name, message);
+        println!("📩 Mensagem recebida de {}: {}", peer_name, message);
     }
 }

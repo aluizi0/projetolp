@@ -64,31 +64,17 @@ impl Peer {
         socket.flush().await?;
     
         let mut file = File::open(file_path).await?;
-        let mut buffer = vec![0; 1024 * 64];
+        let mut buffer = vec![0; 1024 * 64]; // 64KB buffer
         let mut total_sent = 0;
-        let mut ack_buffer = [0u8; 3];
     
         while total_sent < file_size {
             let n = file.read(&mut buffer).await?;
             if n == 0 { break; }
     
-            let block_data = &buffer[..n];
-            let checksum = Self::calculate_checksum(block_data);
-    
-            let header = format!("BLOCK {} {}\n", n, checksum);
-            socket.write_all(header.as_bytes()).await?;
-            socket.flush().await?;
-    
-            socket.write_all(block_data).await?;
+            socket.write_all(&buffer[..n]).await?;
             socket.flush().await?;
             total_sent += n as u64;
             println!("Enviados {}/{} bytes", total_sent, file_size);
-    
-            // Aguarda confirmação
-            let ack = socket.read(&mut ack_buffer).await?;
-            if &ack_buffer != b"ACK" {
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Erro na confirmação do bloco"));
-            }
         }
     
         socket.write_all(b"END\n").await?;
@@ -102,6 +88,7 @@ impl Peer {
         let mut temp_buffer = [0u8; 1024];
         let read_timeout = Duration::from_secs(30);
     
+        // Read the size header
         loop {
             let n = timeout(read_timeout, socket.read(&mut temp_buffer)).await??;
             buffer.push_str(&String::from_utf8_lossy(&temp_buffer[..n]));
@@ -126,74 +113,29 @@ impl Peer {
     
         let mut file = File::create(file_path).await?;
         let mut total_received = 0;
-        let mut data_buffer = vec![0; 1024 * 64];
-        let mut header_buffer = String::new();
+        let mut data_buffer = vec![0; 1024 * 64]; // 64KB buffer
     
         while total_received < file_size {
-            header_buffer.clear();
-            loop {
-                let n = timeout(read_timeout, socket.read(&mut temp_buffer)).await??;
-                if n == 0 {
-                    println!("Conexão fechada prematuramente ao ler o cabeçalho do bloco.");
-                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Conexão fechada prematuramente"));
-                }
-    
-                header_buffer.push_str(&String::from_utf8_lossy(&temp_buffer[..n]));
-    
-                if header_buffer.contains('\n') {
-                    break;
-                }
+            let remaining = file_size - total_received;
+            let to_read = std::cmp::min(data_buffer.len() as u64, remaining) as usize;
+            
+            // Only read what we need
+            let n = timeout(read_timeout, socket.read(&mut data_buffer[..to_read])).await??;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Connection closed prematurely"
+                ));
             }
     
-            let header_line = header_buffer
-                .lines()
-                .next()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid block header"))?;
-    
-            if header_line.trim() == "END" {
-                break;
-            } else if header_line.trim() == "ERROR" {
-                println!("Erro ao receber o arquivo do peer.");
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Erro no peer ao enviar o arquivo"));
-            } else if header_line.trim() == "FILE_NOT_FOUND" {
-                println!("Arquivo não encontrado no peer.");
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Arquivo não encontrado no peer"));
-            }
-    
-            let parts: Vec<&str> = header_line.split_whitespace().collect();
-            if parts.len() != 3 || parts[0] != "BLOCK" {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid block format"));
-            }
-    
-            let block_size: usize = parts[1].parse().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })?;
-            let expected_checksum = parts[2];
-    
-            let mut received = 0;
-            while received < block_size {
-                let n = timeout(read_timeout, socket.read(&mut data_buffer[received..block_size])).await??;
-                if n == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Premature connection close"));
-                }
-                received += n;
-            }
-    
-            let block_data = &data_buffer[..block_size];
-            let calculated_checksum = Self::calculate_checksum(block_data);
-    
-            if calculated_checksum == expected_checksum {
-                file.write_all(block_data).await?;
-                total_received += block_size as u64;
-                println!("Received {}/{} bytes", total_received, file_size);
-                
-                // Envia confirmação
-                socket.write_all(b"ACK").await?;
-                socket.flush().await?;
-            } else {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid block checksum"));
-            }
+            file.write_all(&data_buffer[..n]).await?;
+            total_received += n as u64;
+            println!("Received {}/{} bytes", total_received, file_size);
         }
+    
+        // Read and discard the END marker without writing it to the file
+        let mut end_buffer = [0u8; 4];
+        let _ = timeout(read_timeout, socket.read(&mut end_buffer)).await?;
     
         println!("Download complete! Total received: {} bytes", total_received);
         Ok(())
