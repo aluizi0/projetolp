@@ -1,13 +1,12 @@
-﻿use hex;
-use sha2::{Digest, Sha256};
+﻿use sha2::{Digest, Sha256};
 use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::io;
-use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
+use crc32fast::Hasher;
 
 #[derive(Clone)]
 pub struct SharedFile {
@@ -50,20 +49,38 @@ impl Peer {
         }
     }
 
-    fn calculate_checksum(data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
+    fn calculate_crc32(data: &[u8]) -> u32 {
+        let mut hasher = Hasher::new();
         hasher.update(data);
-        let result = hasher.finalize();
-        hex::encode(result)
+        hasher.finalize()
+    }
+
+    async fn calculate_file_crc32(file_path: &Path) -> io::Result<u32> {
+        let mut file = File::open(file_path).await?;
+        let mut buffer = vec![0u8; 64 * 1024]; // Buffer de 64KB
+        let mut hasher = Hasher::new();
+
+        loop {
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+
+        Ok(hasher.finalize())
     }
 
     async fn send_file_in_blocks(&self, file_path: &Path, socket: &mut TcpStream) -> io::Result<()> {
         let file_size = file_path.metadata()?.len();
+        let checksum = Self::calculate_file_crc32(file_path).await?;
+        
         println!("Iniciando envio do arquivo: {} ({} bytes)", file_path.display(), file_size);
+        println!("CRC32 do arquivo: {:08x}", checksum);
 
-        // Envia o tamanho do arquivo
-        let size_header = format!("SIZE {}\n", file_size);
-        socket.write_all(size_header.as_bytes()).await?;
+        // Envia o tamanho do arquivo e checksum
+        let header = format!("SIZE {} CRC32 {:08x}\n", file_size, checksum);
+        socket.write_all(header.as_bytes()).await?;
         socket.flush().await?;
 
         // Abre e envia o arquivo
@@ -72,17 +89,14 @@ impl Peer {
         let mut total_sent = 0;
 
         while total_sent < file_size {
-            // Lê um bloco do arquivo
             let n = file.read(&mut buffer).await?;
             if n == 0 { break; }
 
-            // Envia o bloco
             let mut bytes_written = 0;
             while bytes_written < n {
                 let written = socket.write(&buffer[bytes_written..n]).await?;
                 if written == 0 {
-                    return Err(io::Error::new(io::ErrorKind::WriteZero, 
-                        "Falha ao escrever no socket"));
+                    return Err(io::Error::new(io::ErrorKind::WriteZero, "Falha ao escrever no socket"));
                 }
                 bytes_written += written;
             }
@@ -90,7 +104,6 @@ impl Peer {
             socket.flush().await?;
             total_sent += n as u64;
 
-            // Atualiza o progresso
             println!("Enviados {}/{} bytes ({:.1}%)", 
                 total_sent, 
                 file_size, 
@@ -104,44 +117,48 @@ impl Peer {
     async fn receive_file_in_blocks(&self, file_path: &str, socket: &mut TcpStream) -> io::Result<()> {
         let read_timeout = Duration::from_secs(30);
         
-        // Lê cabeçalho de tamanho
-        let mut size_buffer = [0u8; 1024];
-        let n = socket.read(&mut size_buffer).await?;
+        // Lê cabeçalho
+        let mut header_buffer = [0u8; 1024];
+        let n = socket.read(&mut header_buffer).await?;
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Conexão fechada prematuramente"));
         }
         
-        let size_str = String::from_utf8_lossy(&size_buffer[..n]);
-        let size_line = size_str.lines().next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Cabeçalho de tamanho inválido")
+        let header_str = String::from_utf8_lossy(&header_buffer[..n]);
+        let header_line = header_str.lines().next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Cabeçalho inválido")
         })?;
-        
-        if !size_line.starts_with("SIZE ") {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, 
-                format!("Formato inválido: {}", size_line)));
+
+        // Parse do cabeçalho "SIZE {tamanho} CRC32 {checksum}"
+        let parts: Vec<&str> = header_line.split_whitespace().collect();
+        if parts.len() != 4 || parts[0] != "SIZE" || parts[2] != "CRC32" {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Formato de cabeçalho inválido"));
         }
 
-        let file_size: u64 = size_line[5..]
-            .trim()
-            .parse()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, 
-                "Falha ao converter tamanho do arquivo"))?;
+        let file_size: u64 = parts[1].parse().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "Tamanho do arquivo inválido")
+        })?;
+
+        let expected_checksum = u32::from_str_radix(parts[3], 16).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "Checksum inválido")
+        })?;
 
         println!("Iniciando recepção do arquivo: {} ({} bytes esperados)", file_path, file_size);
+        println!("CRC32 esperado: {:08x}", expected_checksum);
 
         // Cria o arquivo e diretório se necessário
-        if let Some(parent) = std::path::Path::new(file_path).parent() {
+        if let Some(parent) = Path::new(file_path).parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        
         let mut file = File::create(file_path).await?;
+        let mut hasher = Hasher::new();
         let mut total_received = 0;
         let mut buffer = vec![0u8; 64 * 1024]; // Buffer de 64KB
 
-        // Loop principal de recebimento
         while total_received < file_size {
             let to_read = std::cmp::min(buffer.len() as u64, file_size - total_received) as usize;
             
-            // Lê um bloco com timeout
             let n = match timeout(read_timeout, socket.read(&mut buffer[..to_read])).await {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => return Err(e),
@@ -153,18 +170,29 @@ impl Peer {
                     format!("Conexão fechada após receber {} de {} bytes", total_received, file_size)));
             }
 
-            // Escreve o bloco no arquivo
+            hasher.update(&buffer[..n]);
             file.write_all(&buffer[..n]).await?;
             total_received += n as u64;
 
-            // Atualiza o progresso
             println!("Recebidos {}/{} bytes ({:.1}%)", 
                 total_received, 
                 file_size, 
                 (total_received as f64 / file_size as f64) * 100.0);
         }
 
-        println!("Download completo! Total recebido: {} bytes", total_received);
+        let calculated_checksum = hasher.finalize();
+        if calculated_checksum != expected_checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Erro de checksum: esperado {:08x}, calculado {:08x}",
+                    expected_checksum,
+                    calculated_checksum
+                )
+            ));
+        }
+
+        println!("Download completo e verificado! Total recebido: {} bytes", total_received);
         Ok(())
     }
 
