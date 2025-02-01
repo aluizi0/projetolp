@@ -1,5 +1,4 @@
-﻿use sha2::{Digest, Sha256};
-use std::fs::read_dir;
+﻿use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::io;
 use tokio::fs::File;
@@ -49,6 +48,7 @@ impl Peer {
         }
     }
 
+    #[allow(dead_code)]
     fn calculate_crc32(data: &[u8]) -> u32 {
         let mut hasher = Hasher::new();
         hasher.update(data);

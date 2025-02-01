@@ -41,14 +41,10 @@ impl ChatServer {
     }
 }
 
-pub async fn start_chat_client(target_port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_chat_client(peer_name: String, target_port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", target_port)).await?;
     println!("Conectado ao chat na porta {}", target_port);
-
-    println!("Digite seu nome de peer novamente:");
-    let mut peer_name = String::new();
-    io::stdin().read_line(&mut peer_name).unwrap();
-    let peer_name = peer_name.trim().to_string();
+    println!("Digite sua mensagem:");
 
     loop {
         let mut message = String::new();

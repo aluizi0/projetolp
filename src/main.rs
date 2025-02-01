@@ -150,7 +150,7 @@ async fn main() {
                     io::stdin().read_line(&mut target_port_str).unwrap();
 
                     if let Ok(target_port) = target_port_str.trim().parse::<u16>() {
-                        if let Err(e) = start_chat_client(target_port + 1000).await {
+                        if let Err(e) = start_chat_client(peer_name.clone(), target_port + 1000).await {
                             eprintln!("Erro ao iniciar chat: {}", e);
                         }
                     } else {
