@@ -1,10 +1,18 @@
-﻿use std::fs::read_dir;
+﻿/// Importa `read_dir` do módulo `std::fs` para ler diretórios.
+use std::fs::read_dir;
+/// Importa `Path` e `PathBuf` do módulo `std::path` para manipulação de caminhos de arquivos.
 use std::path::{Path, PathBuf};
+/// Importa `io` do módulo `std` para operações de entrada e saída.
 use std::io;
+/// Importa `File` do Tokio para operações de arquivo assíncronas.
 use tokio::fs::File;
+/// Importa `AsyncReadExt` e `AsyncWriteExt` do Tokio para leitura e escrita assíncronas.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Importa `TcpListener` e `TcpStream` do Tokio para gerenciar conexões TCP assíncronas.
 use tokio::net::{TcpListener, TcpStream};
+/// Importa `timeout` e `Duration` do Tokio para gerenciar tempo de espera em operações assíncronas.
 use tokio::time::{timeout, Duration};
+/// Importa `Hasher` do `crc32fast` para calcular CRC32.
 use crc32fast::Hasher;
 
 #[derive(Clone)]
@@ -23,6 +31,18 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// Cria uma nova instância de `Peer`.
+    ///
+    /// # Argumentos
+    ///
+    /// * `ip` - Endereço IP do peer.
+    /// * `port` - Porta do peer.
+    /// * `shared_files` - Lista de arquivos compartilhados pelo peer.
+    /// * `name` - Nome do peer.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna uma nova instância de `Peer`.
     pub fn new(ip: String, port: u16, shared_files: Vec<String>, name: String) -> Self {
         let shared_files = shared_files
             .into_iter()
@@ -48,6 +68,15 @@ impl Peer {
         }
     }
 
+    /// Calcula o CRC32 dos dados fornecidos.
+    ///
+    /// # Argumentos
+    ///
+    /// * `data` - Dados para os quais o CRC32 será calculado.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna o valor CRC32 calculado.
     #[allow(dead_code)]
     fn calculate_crc32(data: &[u8]) -> u32 {
         let mut hasher = Hasher::new();
@@ -71,6 +100,16 @@ impl Peer {
         Ok(hasher.finalize())
     }
 
+    /// Envia um arquivo em blocos através do socket fornecido.
+    ///
+    /// # Argumentos
+    ///
+    /// * `file_path` - Caminho do arquivo a ser enviado.
+    /// * `socket` - Socket através do qual o arquivo será enviado.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna um `Result` indicando sucesso ou erro.
     async fn send_file_in_blocks(&self, file_path: &Path, socket: &mut TcpStream) -> io::Result<()> {
         let file_size = file_path.metadata()?.len();
         let checksum = Self::calculate_file_crc32(file_path).await?;
@@ -282,6 +321,11 @@ impl Peer {
         Err("Não foi possível baixar o arquivo de nenhum peer".into())
     }
 
+    /// Inicia o servidor do peer.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna um `Result` indicando sucesso ou erro.
     pub async fn start_server(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(format!("{}:{}", self.ip, self.port)).await?;
         println!("Peer rodando em {}:{}", self.ip, self.port);
@@ -344,6 +388,16 @@ impl Peer {
         }
     }
 
+    /// Registra o peer com o tracker.
+    ///
+    /// # Argumentos
+    ///
+    /// * `tracker_ip` - Endereço IP do tracker.
+    /// * `tracker_port` - Porta do tracker.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna um `Result` indicando sucesso ou erro.
     pub async fn register_with_tracker(
         &self,
         tracker_ip: &str,
@@ -384,6 +438,15 @@ impl Peer {
     }
 }
 
+/// Lista arquivos locais disponíveis para compartilhamento.
+///
+/// # Argumentos
+///
+/// * `dir` - Diretório onde os arquivos serão listados.
+///
+/// # Retornos
+///
+/// Retorna um vetor de tuplas contendo o nome do arquivo e o caminho.
 pub fn list_local_files(directory: Option<&str>) -> Vec<(String, PathBuf)> {
     let mut files = Vec::new();
 

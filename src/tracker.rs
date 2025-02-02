@@ -1,22 +1,41 @@
-﻿use tokio::net::TcpListener;
+﻿/// Importa `TcpListener` do Tokio para gerenciar conexões TCP assíncronas.
+use tokio::net::TcpListener;
+/// Importa `AsyncReadExt` e `AsyncWriteExt` do Tokio para leitura e escrita assíncronas.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Importa `Mutex` do Tokio para sincronização entre tarefas assíncronas.
 use tokio::sync::Mutex;
+/// Importa `Arc` do módulo `std::sync` para criar ponteiros inteligentes de contagem de referência.
 use std::sync::Arc;
+/// Importa `HashSet` do módulo `std::collections` para armazenar um conjunto de peers.
 use std::collections::HashSet;
 
+/// Estrutura que representa o tracker.
 #[derive(Clone)]
 pub struct Tracker {
     peers: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Tracker {
+    /// Cria uma nova instância do tracker.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna uma nova instância de `Tracker`.
     pub fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    /// Inicia o servidor tracker
+    /// Inicia o tracker na porta especificada.
+    ///
+    /// # Argumentos
+    ///
+    /// * `port` - Porta na qual o tracker será iniciado.
+    ///
+    /// # Retornos
+    ///
+    /// Retorna um `Result` indicando sucesso ou erro.
     pub async fn start(&self, port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
         println!("Tracker rodando na porta {}", port);
