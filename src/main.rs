@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::env;
 use std::io::{self, Write};
 use tokio::sync::mpsc;
+use tokio::signal;
+use tokio::sync::oneshot;
 
 /// Função principal que inicia o tracker ou um peer com base nos argumentos fornecidos.
 #[tokio::main]
@@ -117,7 +119,26 @@ async fn iniciar_peer() {
         }
     });
 
-    interface_comandos(peer, peer_name).await;
+    // Criamos um canal de notificação para saída segura
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let peer_clone = Arc::clone(&peer);
+    tokio::spawn(async move {
+        let _ = signal::ctrl_c().await;
+        println!("\n[INFO] Ctrl+C detectado, desconectando do tracker...");
+        let _ = peer_clone.unregister_from_tracker("127.0.0.1", 6881).await;
+        let _ = shutdown_tx.send(()); // Notifica que pode sair
+    });
+
+    // Executa a interface de comandos enquanto não recebe sinal de desligamento
+    tokio::select! {
+        _ = interface_comandos(peer, peer_name) => {
+            println!("Saindo normalmente...");
+        }
+        _ = shutdown_rx => {
+            println!("Encerramento seguro devido a Ctrl+C...");
+        }
+    }
 }
 
 /// Interface de comandos do terminal para interação com o peer.
