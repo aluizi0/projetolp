@@ -1,470 +1,535 @@
-﻿/// Importa `read_dir` do módulo `std::fs` para ler diretórios.
-use std::fs::read_dir;
-/// Importa `Path` e `PathBuf` do módulo `std::path` para manipulação de caminhos de arquivos.
-use std::path::{Path, PathBuf};
-/// Importa `io` do módulo `std` para operações de entrada e saída.
-use std::io;
-/// Importa `File` do Tokio para operações de arquivo assíncronas.
-use tokio::fs::File;
-/// Importa `AsyncReadExt` e `AsyncWriteExt` do Tokio para leitura e escrita assíncronas.
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-/// Importa `TcpListener` e `TcpStream` do Tokio para gerenciar conexões TCP assíncronas.
-use tokio::net::{TcpListener, TcpStream};
-/// Importa `timeout` e `Duration` do Tokio para gerenciar tempo de espera em operações assíncronas.
-use tokio::time::{timeout, Duration};
-/// Importa `Hasher` do `crc32fast` para calcular CRC32.
-use crc32fast::Hasher;
+use axum::{extract::Query, http::StatusCode, Router}; // Framework web para criar APIs HTTP
+use reqwest::Client; // Cliente HTTP para comunicação com o tracker
+use serde::{Serialize, Deserialize}; // Serialização e deserialização de JSON
+use std::collections::{HashMap, HashSet}; // Estruturas de dados para mapear peers e arquivos
+use std::{error::Error, sync::Arc, io, fs}; // Tratamento de erros e manipulação de arquivos
+use tokio::net::TcpListener; // Listener TCP para aceitar conexões de outros peers
+use rand::Rng; // Gerador de números aleatórios
+use std::fs::File; // Manipulação de arquivos
+use std::io::{Read, Write}; // Leitura e escrita de arquivos
+use tokio::time::{self, Duration}; // Utilitários para tempo e delays assíncronos
+use axum::routing::{get, post}; // Rotas HTTP para interações P2P
+use rand::prelude::SliceRandom; // Escolha aleatória de peers ao baixar arquivos
+// Removida a importação não utilizada: use tokio::task;
 
-#[derive(Clone)]
-pub struct SharedFile {
-    full_path: PathBuf,
-    name: String,
-    size: u64,
+use crate::chat;
+use crate::file_utils::{split_file, assemble_file, compute_file_checksum};
+
+// Estrutura para registrar um novo peer no tracker
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterRequest {
+    name: String,      // Nome do peer
+    address: String,   // Endereço do peer
 }
 
-#[derive(Clone)]
-pub struct Peer {
-    pub ip: String,
-    pub port: u16,
-    pub shared_files: Vec<SharedFile>,
-    pub name: String,
+// Estrutura para registrar chunks de arquivos
+#[derive(Debug, Serialize, Deserialize)]
+struct ChunkRegister {
+    peer: String,          // Nome do peer que possui o chunk
+    file_name: String,     // Nome do arquivo original
+    chunk_name: String,    // Nome do chunk específico
+    checksum: String,      // Checksum para verificação de integridade
+    peer_address: String,  // Endereço do peer que possui o chunk
 }
 
-impl Peer {
-    /// Cria uma nova instância de `Peer`.
-    ///
-    /// # Argumentos
-    ///
-    /// * `ip` - Endereço IP do peer.
-    /// * `port` - Porta do peer.
-    /// * `shared_files` - Lista de arquivos compartilhados pelo peer.
-    /// * `name` - Nome do peer.
-    ///
-    /// # Retornos
-    ///
-    /// Retorna uma nova instância de `Peer`.
-    pub fn new(ip: String, port: u16, shared_files: Vec<String>, name: String) -> Self {
-        let shared_files = shared_files
-            .into_iter()
-            .filter_map(|path| {
-                let path_buf = PathBuf::from(&path);
-                if let Ok(metadata) = std::fs::metadata(&path_buf) {
-                    Some(SharedFile {
-                        name: path_buf.file_name()?.to_string_lossy().to_string(),
-                        full_path: path_buf,
-                        size: metadata.len(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        Self {
-            ip,
-            port,
-            shared_files,
-            name,
-        }
-    }
-
-    /// Calcula o CRC32 dos dados fornecidos.
-    ///
-    /// # Argumentos
-    ///
-    /// * `data` - Dados para os quais o CRC32 será calculado.
-    ///
-    /// # Retornos
-    ///
-    /// Retorna o valor CRC32 calculado.
-    #[allow(dead_code)]
-    fn calculate_crc32(data: &[u8]) -> u32 {
-        let mut hasher = Hasher::new();
-        hasher.update(data);
-        hasher.finalize()
-    }
-
-    async fn calculate_file_crc32(file_path: &Path) -> io::Result<u32> {
-        let mut file = File::open(file_path).await?;
-        let mut buffer = vec![0u8; 64 * 1024]; // Buffer de 64KB
-        let mut hasher = Hasher::new();
-
-        loop {
-            let n = file.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-
-        Ok(hasher.finalize())
-    }
-
-    /// Envia um arquivo em blocos através do socket fornecido.
-    ///
-    /// # Argumentos
-    ///
-    /// * `file_path` - Caminho do arquivo a ser enviado.
-    /// * `socket` - Socket através do qual o arquivo será enviado.
-    ///
-    /// # Retornos
-    ///
-    /// Retorna um `Result` indicando sucesso ou erro.
-    async fn send_file_in_blocks(&self, file_path: &Path, socket: &mut TcpStream) -> io::Result<()> {
-        let file_size = file_path.metadata()?.len();
-        let checksum = Self::calculate_file_crc32(file_path).await?;
-        
-        println!("Iniciando envio do arquivo: {} ({} bytes)", file_path.display(), file_size);
-        println!("CRC32 do arquivo: {:08x}", checksum);
-
-        // Envia o tamanho do arquivo e checksum
-        let header = format!("SIZE {} CRC32 {:08x}\n", file_size, checksum);
-        socket.write_all(header.as_bytes()).await?;
-        socket.flush().await?;
-
-        // Abre e envia o arquivo
-        let mut file = File::open(file_path).await?;
-        let mut buffer = vec![0u8; 64 * 1024]; // Buffer de 64KB
-        let mut total_sent = 0;
-
-        while total_sent < file_size {
-            let n = file.read(&mut buffer).await?;
-            if n == 0 { break; }
-
-            let mut bytes_written = 0;
-            while bytes_written < n {
-                let written = socket.write(&buffer[bytes_written..n]).await?;
-                if written == 0 {
-                    return Err(io::Error::new(io::ErrorKind::WriteZero, "Falha ao escrever no socket"));
-                }
-                bytes_written += written;
-            }
-
-            socket.flush().await?;
-            total_sent += n as u64;
-
-            println!("Enviados {}/{} bytes ({:.1}%)", 
-                total_sent, 
-                file_size, 
-                (total_sent as f64 / file_size as f64) * 100.0);
-        }
-
-        println!("Envio completo! Total enviado: {} bytes", total_sent);
-        Ok(())
-    }
-    
-    async fn receive_file_in_blocks(&self, file_path: &str, socket: &mut TcpStream) -> io::Result<()> {
-        let read_timeout = Duration::from_secs(30);
-        
-        // Lê cabeçalho
-        let mut header_buffer = [0u8; 1024];
-        let n = socket.read(&mut header_buffer).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Conexão fechada prematuramente"));
-        }
-        
-        let header_str = String::from_utf8_lossy(&header_buffer[..n]);
-        let header_line = header_str.lines().next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Cabeçalho inválido")
-        })?;
-
-        // Parse do cabeçalho "SIZE {tamanho} CRC32 {checksum}"
-        let parts: Vec<&str> = header_line.split_whitespace().collect();
-        if parts.len() != 4 || parts[0] != "SIZE" || parts[2] != "CRC32" {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Formato de cabeçalho inválido"));
-        }
-
-        let file_size: u64 = parts[1].parse().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "Tamanho do arquivo inválido")
-        })?;
-
-        let expected_checksum = u32::from_str_radix(parts[3], 16).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "Checksum inválido")
-        })?;
-
-        println!("Iniciando recepção do arquivo: {} ({} bytes esperados)", file_path, file_size);
-        println!("CRC32 esperado: {:08x}", expected_checksum);
-
-        // Cria o arquivo e diretório se necessário
-        if let Some(parent) = Path::new(file_path).parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        
-        let mut file = File::create(file_path).await?;
-        let mut hasher = Hasher::new();
-        let mut total_received = 0;
-        let mut buffer = vec![0u8; 64 * 1024]; // Buffer de 64KB
-
-        while total_received < file_size {
-            let to_read = std::cmp::min(buffer.len() as u64, file_size - total_received) as usize;
-            
-            let n = match timeout(read_timeout, socket.read(&mut buffer[..to_read])).await {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout na leitura")),
-            };
-
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, 
-                    format!("Conexão fechada após receber {} de {} bytes", total_received, file_size)));
-            }
-
-            hasher.update(&buffer[..n]);
-            file.write_all(&buffer[..n]).await?;
-            total_received += n as u64;
-
-            println!("Recebidos {}/{} bytes ({:.1}%)", 
-                total_received, 
-                file_size, 
-                (total_received as f64 / file_size as f64) * 100.0);
-        }
-
-        let calculated_checksum = hasher.finalize();
-        if calculated_checksum != expected_checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Erro de checksum: esperado {:08x}, calculado {:08x}",
-                    expected_checksum,
-                    calculated_checksum
-                )
-            ));
-        }
-
-        println!("Download completo e verificado! Total recebido: {} bytes", total_received);
-        Ok(())
-    }
-
-
-    pub async fn list_peer_files(
-        &self,
-        peer_addr: &str,
-    ) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(peer_addr).await?;
-        stream.write_all(b"LIST_FILES").await?;
-
-        let mut buffer = [0; 4096];
-        let n = stream.read(&mut buffer).await?;
-        let files_str = String::from_utf8_lossy(&buffer[..n]).to_string();
-
-        let files = files_str
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| {
-                let parts: Vec<&str> = s.split('|').collect();
-                if parts.len() == 2 {
-                    Some((parts[0].to_string(), parts[1].parse::<u64>().unwrap_or(0)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        Ok(files)
-    }
-
-    pub async fn list_network_files(
-        &self,
-        peers: Vec<String>,
-    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        let mut network_files = Vec::new();
-
-        for peer in peers {
-            if peer != format!("{}:{}", self.ip, self.port) {
-                match self.list_peer_files(&peer).await {
-                    Ok(files) => {
-                        for (file_name, _) in files {
-                            network_files.push((file_name, peer.clone()));
-                        }
-                    }
-                    Err(e) => println!("Erro ao listar arquivos do peer {}: {}", peer, e),
-                }
-            }
-        }
-
-        Ok(network_files)
-    }
-
-    pub async fn download_blocks_from_peers(
-        &self,
-        peers: Vec<String>,
-        file_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for peer in peers {
-            if peer != format!("{}:{}", self.ip, self.port) {
-                println!("Tentando baixar {} do peer {}", file_name, peer);
-
-                if let Ok(mut socket) = TcpStream::connect(&peer).await {
-                    let request = format!("REQUEST_FILE {}", file_name);
-                    socket.write_all(request.as_bytes()).await?;
-
-                    // Cria diretório de downloads se não existir
-                    let download_dir =
-                        dirs::download_dir().unwrap_or_else(|| PathBuf::from("downloads"));
-                    tokio::fs::create_dir_all(&download_dir).await?;
-
-                    let download_path = download_dir.join(file_name);
-                    match self
-                        .receive_file_in_blocks(download_path.to_str().unwrap(), &mut socket)
-                        .await
-                    {
-                        Ok(_) => {
-                            println!("Download concluído com sucesso!");
-                            return Ok(());
-                        }
-                        Err(e) => println!("Erro no download de {}: {}", peer, e),
-                    }
-                }
-            }
-        }
-
-        Err("Não foi possível baixar o arquivo de nenhum peer".into())
-    }
-
-    /// Inicia o servidor do peer.
-    ///
-    /// # Retornos
-    ///
-    /// Retorna um `Result` indicando sucesso ou erro.
-    pub async fn start_server(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(format!("{}:{}", self.ip, self.port)).await?;
-        println!("Peer rodando em {}:{}", self.ip, self.port);
-
-        loop {
-            let (mut socket, _) = listener.accept().await?;
-            let shared_files = self.shared_files.clone();
-            let peer_clone = self.clone();
-
-            tokio::spawn(async move {
-                let mut buffer = [0; 1024];
-                if let Ok(n) = socket.read(&mut buffer).await {
-                    let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-
-                    if request.starts_with("LIST_FILES") {
-                        // Envia lista de arquivos com nome e tamanho
-                        let file_list: Vec<String> = shared_files
-                            .iter()
-                            .map(|sf| format!("{}|{}", sf.name, sf.size))
-                            .collect();
-
-                        let response = file_list.join(",");
-                        socket
-                            .write_all(response.as_bytes())
-                            .await
-                            .unwrap_or_else(|e| {
-                                println!("Erro ao enviar lista de arquivos: {}", e);
-                            });
-                    } else if request.starts_with("REQUEST_FILE") {
-                        let requested_name = request.split_whitespace().nth(1).unwrap_or("");
-                        println!(
-                            "Requisição de download recebida para o arquivo: {}",
-                            requested_name
-                        );
-
-                        // Procura o arquivo pelo nome
-                        if let Some(shared_file) =
-                            shared_files.iter().find(|sf| sf.name == requested_name)
-                        {
-                            println!("Arquivo encontrado: {}", shared_file.full_path.display());
-                            match peer_clone
-                                .send_file_in_blocks(&shared_file.full_path, &mut socket)
-                                .await
-                            {
-                                Ok(_) => {
-                                    println!("Arquivo {} enviado com sucesso", shared_file.name)
-                                }
-                                Err(e) => {
-                                    println!("Erro ao enviar arquivo {}: {}", shared_file.name, e);
-                                    socket.write_all(b"ERROR\n").await.ok(); // Envia um aviso de erro
-                                }
-                            }
-                        } else {
-                            println!("Arquivo {} não encontrado", requested_name);
-                            socket.write_all(b"FILE_NOT_FOUND\n").await.ok(); // Envia um aviso de arquivo não encontrado
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    /// Registra o peer com o tracker.
-    ///
-    /// # Argumentos
-    ///
-    /// * `tracker_ip` - Endereço IP do tracker.
-    /// * `tracker_port` - Porta do tracker.
-    ///
-    /// # Retornos
-    ///
-    /// Retorna um `Result` indicando sucesso ou erro.
-    pub async fn register_with_tracker(
-        &self,
-        tracker_ip: &str,
-        tracker_port: u16,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(format!("{}:{}", tracker_ip, tracker_port)).await?;
-        let message = format!("REGISTER {}:{}:{}", self.name, self.ip, self.port);
-        stream.write_all(message.as_bytes()).await?;
-        println!("Registrado no tracker {}:{}", tracker_ip, tracker_port);
-        Ok(())
-    }
-
-    pub async fn unregister_from_tracker(
-        &self,
-        tracker_ip: &str,
-        tracker_port: u16,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(format!("{}:{}", tracker_ip, tracker_port)).await?;
-        let message = format!("UNREGISTER {}:{}", self.ip, self.port);
-        stream.write_all(message.as_bytes()).await?;
-        println!("Desregistrado do tracker {}:{}", tracker_ip, tracker_port);
-        Ok(())
-    }
-
-    pub async fn get_peers_from_tracker(
-        &self,
-        tracker_ip: &str,
-        tracker_port: u16,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(format!("{}:{}", tracker_ip, tracker_port)).await?;
-        stream.write_all(b"GET_PEERS").await?;
-
-        let mut buffer = [0; 1024];
-        let n = stream.read(&mut buffer).await?;
-        let peer_list = String::from_utf8_lossy(&buffer[..n]).to_string();
-        let peers = peer_list.split(',').map(|s| s.to_string()).collect();
-        Ok(peers)
-    }
+// Estado compartilhado do peer
+#[allow(dead_code)]
+struct PeerState {
+    name: String,          // Nome do peer
+    tracker_url: String,   // URL do tracker
+    address: String,       // Endereço do peer
 }
 
-/// Lista arquivos locais disponíveis para compartilhamento.
-///
-/// # Argumentos
-///
-/// * `dir` - Diretório onde os arquivos serão listados.
-///
-/// # Retornos
-///
-/// Retorna um vetor de tuplas contendo o nome do arquivo e o caminho.
-pub fn list_local_files(directory: Option<&str>) -> Vec<(String, PathBuf)> {
-    let mut files = Vec::new();
+// Informações sobre um peer
+#[derive(Debug, Serialize, Deserialize)]
+struct PeerInfo {
+    name: String,          // Nome do peer
+    address: String,       // Endereço do peer
+    files: Vec<String>,    // Lista de arquivos compartilhados
+}
 
-    let directories = match directory {
-        Some(dir) => vec![PathBuf::from(dir)],
-        None => vec![
-            dirs::home_dir().unwrap_or_default().join("Documents"),
-            dirs::home_dir().unwrap_or_default().join("Downloads"),
-        ],
+#[allow(dead_code)]
+type SharedState = Arc<PeerState>;
+
+/// Registra um novo peer no tracker
+async fn register_peer(name: &str, address: &str) -> bool {
+    let client = Client::new();
+    let request = RegisterRequest {
+        name: name.to_string(),
+        address: address.to_string(),
     };
 
-    for dir in directories {
-        if let Ok(entries) = read_dir(&dir) {
+    // Envia requisição POST para registro
+    let res = client.post("http://127.0.0.1:9500/register")
+        .json(&request)
+        .send()
+        .await;
+
+    match res {
+        Ok(response) if response.status().is_success() => {
+            println!("✅ Peer '{}' registrado com sucesso!", name);
+            true
+        }
+        _ => {
+            println!("❌ Nome de usuário já está em uso. Escolha outro.");
+            false
+        }
+    }
+}
+
+/// Registra chunks de arquivos no Tracker
+async fn register_chunks(peer_name: &str, peer_address: &str, file_name: &str) -> Result<(), Box<dyn Error>> {
+    let client = Client::new();
+    
+    // Verifica se o arquivo já está registrado no Tracker
+    let url = format!("http://127.0.0.1:9500/list");
+    let res = client.get(&url).send().await?;
+
+    if res.status().is_success() {
+        let list: Vec<PeerInfo> = res.json().await?;
+        for peer_info in list {
+            if peer_info.name == peer_name {
+                if peer_info.files.contains(&file_name.to_string()) {
+                    println!("⚠️ O arquivo '{}' já está registrado no Tracker. Ignorando...", file_name);
+                    return Ok(()); // Se o arquivo já está registrado, não faz nada
+                }
+                break;
+            }
+        }
+    }
+
+    // Divide o arquivo em chunks
+    let chunks = split_file(file_name);
+    if chunks.is_empty() {
+        println!("❌ Nenhum chunk foi criado para '{}'. Verifique se o arquivo existe.", file_name);
+        return Ok(());
+    }
+
+    // Registra cada chunk no Tracker, validando o checksum antes
+    for (_, chunk_name, expected_checksum) in &chunks {
+        // Calcula o checksum real do chunk antes de registrá-lo
+        let computed_checksum = compute_file_checksum(chunk_name);
+        if computed_checksum != *expected_checksum {
+            println!("❌ Erro: Checksum inválido para '{}'. Chunk corrompido.", chunk_name);
+            continue; // Se o checksum não bate, não registra o chunk
+        }
+
+        let chunk_data = ChunkRegister {
+            peer: peer_name.to_string(),
+            peer_address: peer_address.to_string(),
+            file_name: file_name.to_string(),
+            chunk_name: chunk_name.to_string(),
+            checksum: expected_checksum.to_string(),
+        };
+
+        let res = client.post("http://127.0.0.1:9500/register_chunk")
+            .json(&chunk_data)
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            println!("✅ Chunk '{}' registrado no Tracker!", chunk_name);
+        } else {
+            println!("❌ Erro ao registrar chunk '{}'", chunk_name);
+        }
+    }
+
+    Ok(())
+}
+
+
+/// Obtém a lista de chunks disponíveis no tracker
+async fn get_chunks(file_name: &str) -> Result<Vec<ChunkRegister>, Box<dyn Error>> {
+    let client = Client::new();
+    let url = format!("http://127.0.0.1:9500/get_file_chunks?file={}", file_name);
+    let res = client.get(&url).send().await?;
+
+    if res.status().is_success() {
+        let chunks: Vec<ChunkRegister> = res.json().await?;
+        Ok(chunks)
+    } else {
+        println!("❌ Erro ao buscar chunks do arquivo '{}'.", file_name);
+        Ok(vec![])
+    }
+}
+
+/// Lista todos os peers e arquivos disponíveis na rede
+async fn list_peers() -> Result<(), Box<dyn Error>> {
+    let client = Client::new();
+    let url = "http://127.0.0.1:9500/list".to_string();
+    let res = client.get(&url).send().await?;
+    
+    if res.status().is_success() {
+        let list: Vec<PeerInfo> = res.json().await?;
+        println!("📋 Lista de Peers e Arquivos:");
+        for peer in list {
+            println!("🔹 Peer: {} ({})", peer.name, peer.address);
+            if peer.files.is_empty() {
+                println!("  📄 Sem arquivos compartilhados");
+            } else {
+                for file in peer.files {
+                    println!("  📄 {}", file);
+                }
+            }
+        }
+    } else {
+        println!("❌ Erro ao buscar a lista de peers.");
+    }
+    Ok(())
+}
+
+/// Baixa os chunks diretamente dos peers e os salva localmente
+/// Baixa os chunks diretamente dos peers e os salva localmente.
+/// Agora, ele continua tentando até baixar todos os chunks necessários.
+async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
+    let mut chunk_map: HashMap<String, Vec<ChunkRegister>> = HashMap::new();
+
+    // Agrupa os chunks pelo nome para saber quais peers possuem quais partes
+    for chunk in chunks {
+        chunk_map.entry(chunk.chunk_name.clone()).or_default().push(chunk);
+    }
+
+    let mut missing_chunks: HashSet<String> = chunk_map.keys().cloned().collect();
+    
+    while !missing_chunks.is_empty() {
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<String, (String, String)>>> = vec![];
+
+        for chunk_name in missing_chunks.clone() {
+            if let Some(chunk_peers) = chunk_map.get_mut(&chunk_name) {
+                // Escolhe um peer aleatório entre os que ainda possuem o chunk
+                if let Some(selected_peer) = chunk_peers.choose(&mut rand::thread_rng()) {
+                    let chunk_name_clone = chunk_name.clone();
+                    let peer_address = selected_peer.peer_address.clone();
+                    let checksum = selected_peer.checksum.clone();
+                    let client_clone = client.clone();
+
+                    tasks.push(tokio::spawn(async move {
+                        let chunk_url = format!("http://{}/get_chunk?name={}", peer_address, chunk_name_clone);
+                        println!("⬇️ Tentando baixar chunk '{}' de '{}'", chunk_name_clone, peer_address);
+                    
+                        match client_clone.get(&chunk_url).send().await {
+                            Ok(res) if res.status().is_success() => {
+                                let bytes = res.bytes().await.unwrap();
+                                let mut file = File::create(&chunk_name_clone).unwrap();
+                                file.write_all(&bytes).unwrap();
+                    
+                                let downloaded_checksum = compute_file_checksum(&chunk_name_clone);
+                                if downloaded_checksum != checksum {
+                                    println!("❌ Checksum inválido para '{}'. Excluindo chunk corrompido.", chunk_name_clone);
+                                    std::fs::remove_file(&chunk_name_clone).unwrap();
+                                    return Err((chunk_name_clone, peer_address)); // Retorna o chunk e o peer que falhou
+                                }
+                    
+                                println!("✅ Chunk '{}' baixado com sucesso!", chunk_name_clone);
+                                Ok(chunk_name_clone) // Indica sucesso no download
+                            }
+                            _ => Err((chunk_name_clone, peer_address)), // Se falhar, retorna o nome do chunk e o peer que falhou
+                        }
+                    }));
+                }
+            }
+        }
+
+        let results = futures::future::join_all(tasks).await;
+
+        // Processa os resultados
+        for result in results {
+            match result {
+                Ok(Ok(chunk_name)) => {
+                    missing_chunks.remove(&chunk_name); // Remove da lista de chunks pendentes
+                }
+                Ok(Err((chunk_name, failed_peer))) => {
+                    println!("❌ Falha ao baixar '{}'. Removendo '{}' da lista de peers válidos.", chunk_name, failed_peer);
+                    // Remove o peer que falhou da lista de peers disponíveis para esse chunk
+                    if let Some(peers) = chunk_map.get_mut(&chunk_name) {
+                        peers.retain(|peer| peer.peer_address != failed_peer);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !missing_chunks.is_empty() {
+            println!("🔄 Alguns chunks falharam no download. Tentando novamente...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // Pequeno delay antes de tentar novamente
+        }
+    }
+
+    println!("✅ Todos os chunks foram baixados!");
+    println!("🔄 Tentando reconstruir o arquivo original '{}'", file_name);
+    assemble_file(file_name);
+
+    Ok(())
+}
+
+
+/// Servidor que permite que outros peers baixem chunks deste peer
+async fn send_chunk(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Vec<u8>, StatusCode> {
+    if let Some(chunk_name) = params.get("name") {
+        let mut file = match File::open(chunk_name) {
+            Ok(f) => f,
+            Err(_) => return Err(StatusCode::NOT_FOUND),
+        };
+
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).unwrap();
+        Ok(buffer)
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+/// Função auxiliar para download e registro automático de arquivos
+async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &str) {
+    println!("🔄 Buscando chunks de '{}'...", file_name);
+    match get_chunks(file_name).await {
+        Ok(chunks) if chunks.is_empty() => println!("⚠️ Nenhum chunk encontrado."),
+        Ok(chunks) => {
+            if let Err(e) = download_chunks(chunks, file_name).await {
+                println!("❌ Erro ao baixar chunks: {}", e);
+            } else {
+                println!("✅ Download concluído e arquivo reconstruído!");
+                println!("📢 Registrando automaticamente o arquivo baixado...");
+                if let Err(e) = register_chunks(peer_name, peer_address, file_name).await {
+                    println!("❌ Erro ao registrar '{}': {}", file_name, e);
+                }
+            }
+        }
+        Err(e) => println!("❌ Erro ao buscar arquivo '{}': {}", file_name, e),
+    }
+}
+
+/// Monitor de arquivos deletados
+async fn monitor_deleted_files(peer_name: String) {
+    loop {
+        time::sleep(Duration::from_secs(1)).await;
+
+        // Verifica arquivos atuais no diretório
+        if let Ok(entries) = fs::read_dir(".") {
+            let current_files: Vec<String> = entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
+                .collect();
+
+            // Verifica arquivos registrados no tracker
+            let client = Client::new();
+            let url = "http://127.0.0.1:9500/list".to_string();
+            let res = client.get(&url).send().await;
+
+            if let Ok(response) = res {
+                if response.status().is_success() {
+                    let list: std::collections::HashMap<String, Vec<String>> = response.json().await.unwrap_or_default();
+
+                    if let Some(files) = list.get(&peer_name) {
+                        for file in files {
+                            if !current_files.contains(file) {
+                                println!("🚨 O arquivo '{}' foi deletado! Removendo do Tracker...", file);
+                                if let Err(e) = unregister_file(&peer_name, file).await {
+                                    println!("❌ Erro ao remover '{}': {}", file, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+async fn monitor_lost_chunks(peer_name: String) {
+    loop {
+        time::sleep(Duration::from_secs(10)).await;
+
+        // Lista todos os arquivos no diretório
+        let mut current_chunks: HashSet<String> = HashSet::new();
+        if let Ok(entries) = fs::read_dir(".") {
             for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_file() {
-                        if let Ok(file_name) = entry.file_name().into_string() {
-                            files.push((file_name, entry.path()));
+                if let Some(file_name) = entry.file_name().to_str() {
+                    if file_name.contains(".chunk") {
+                        current_chunks.insert(file_name.to_string());
+                    }
+                }
+            }
+        }
+
+        // Obtém do Tracker quais chunks esse Peer deveria ter
+        let client = Client::new();
+        let url = format!("http://127.0.0.1:9500/get_peer_chunks?peer={}", peer_name);
+        let res = client.get(&url).send().await;
+
+        if let Ok(response) = res {
+            if response.status().is_success() {
+                let expected_chunks: Vec<String> = response.json().await.unwrap_or_default();
+
+                for chunk in expected_chunks {
+                    if !current_chunks.contains(&chunk) {
+                        println!("🚨 Chunk '{}' foi perdido! Removendo do Tracker...", chunk);
+                        let payload = serde_json::json!({ "peer": peer_name, "chunk": chunk });
+                        let _ = client.post("http://127.0.0.1:9500/unregister_chunk")
+                            .json(&payload)
+                            .send()
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/// Remove um arquivo do tracker
+async fn unregister_file(peer_name: &str, file_name: &str) -> Result<(), Box<dyn Error>> {
+    let client = Client::new();
+    let payload = serde_json::json!({ "peer": peer_name, "file": file_name });
+
+    let res = client.post("http://127.0.0.1:9500/unregister_file")
+        .json(&payload)
+        .send()
+        .await?;
+
+    let status = res.status();
+    let response_text = res.text().await?;
+
+    if status.is_success() {
+        println!("🚨 Arquivo '{}' removido do Tracker! Resposta: {}", file_name, response_text);
+    } else {
+        println!("❌ Falha ao remover '{}': HTTP {} - {}", file_name, status, response_text);
+    }
+
+    Ok(())
+}
+
+/// Remove um peer do tracker
+async fn unregister_peer(peer_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
+    let payload = serde_json::json!({ "peer": peer_name });
+
+    let res = client.post("http://127.0.0.1:9500/unregister_peer")
+        .json(&payload)
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        println!("👋 Peer '{}' removido do Tracker com sucesso!", peer_name);
+    } else {
+        println!("❌ Falha ao remover peer '{}'.", peer_name);
+    }
+
+    Ok(())
+}
+
+/// Monitor de arquivos ausentes - verifica periodicamente se arquivos registrados ainda existem
+async fn monitor_missing_files(peer_name: String) {
+    loop {
+        time::sleep(Duration::from_secs(1)).await;
+
+        // Cria um conjunto com os arquivos atualmente presentes no diretório
+        let mut current_files: HashSet<String> = HashSet::new();
+        if let Ok(entries) = fs::read_dir(".") {
+            for entry in entries.flatten() {
+                if let Some(file_name) = entry.file_name().to_str() {
+                    current_files.insert(file_name.to_string());
+                }
+            }
+        }
+
+        // Consulta a lista de arquivos registrados no tracker
+        let client = Client::new();
+        let url = "http://127.0.0.1:9500/list".to_string();
+        let res = client.get(&url).send().await;
+
+        if let Ok(response) = res {
+            if response.status().is_success() {
+                let list: Vec<PeerInfo> = response.json().await.unwrap_or_default();
+
+                // Verifica os arquivos registrados para este peer
+                for peer in list {
+                    if peer.name == peer_name {
+                        for file in peer.files {
+                            // Verifica se existem chunks do arquivo
+                            let has_chunks = current_files.iter().any(|f| f.starts_with(&file) && f.contains(".chunk"));
+
+                            // Se o arquivo não existe e não há chunks, remove do tracker
+                            if !current_files.contains(&file) && !has_chunks {
+                                println!("🚨 Arquivo '{}' sumiu! Removendo do Tracker...", file);
+                                if let Err(e) = unregister_file(&peer_name, &file).await {
+                                    println!("❌ Erro ao remover '{}': {}", file, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Função principal que inicia o peer
+pub async fn start_peer() {
+    // Solicita e valida o nome do usuário
+    let mut name = String::new();
+    loop {
+        print!("Digite seu nome de usuário: ");
+        io::Write::flush(&mut io::stdout()).unwrap();
+        io::stdin().read_line(&mut name).unwrap();
+        name = name.trim().to_string();
+
+        if !name.is_empty() {
+            break;
+        }
+        println!("❌ Nome inválido. Tente novamente.");
+    }
+
+    // Gera uma porta aleatória entre 8000 e 9000
+    let port = rand::thread_rng().gen_range(8000..9000);
+    let address = format!("127.0.0.1:{}", port);
+
+    // Tenta registrar o peer no tracker
+    if !register_peer(&name, &address).await {
+        return;
+    }
+
+    // Inicia os monitores de arquivos em background
+    tokio::spawn(monitor_deleted_files(name.clone()));
+    tokio::spawn(monitor_missing_files(name.clone())); 
+
+    // Configura o estado compartilhado do peer
+    let state = Arc::new(PeerState {
+        name: name.clone(),
+        tracker_url: "http://127.0.0.1:9500".to_string(),
+        address: address.clone(),
+    });
+
+    // Configura as rotas do servidor
+    let app = Router::new()
+        .route("/get_chunk", get(send_chunk))
+        .route("/chat", post(chat::receive_chat)) 
+        .with_state(state.clone());
+    
+    // Inicia o servidor na porta escolhida
+    let listener = TcpListener::bind(&address).await.unwrap();
+    println!("📡 Peer '{}' rodando em {}", name, address);
+
+    // Inicia o servidor em uma task separada
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Verifica e compartilha automaticamente arquivos .txt existentes
+    if let Ok(entries) = fs::read_dir(".") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(extension) = path.extension() {
+                    if extension == "txt" {
+                        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+                        println!("📂 Arquivo encontrado: '{}' - Compartilhando automaticamente...", file_name);
+                        if let Err(e) = register_chunks(&name, &address, &file_name).await {
+                            println!("❌ Erro ao compartilhar '{}': {}", file_name, e);
                         }
                     }
                 }
@@ -472,5 +537,98 @@ pub fn list_local_files(directory: Option<&str>) -> Vec<(String, PathBuf)> {
         }
     }
 
-    files
+    // Loop principal de comandos
+    loop {
+        println!("\n📜 Comandos: share | get | list | chat | exit");
+
+        let mut command = String::new();
+        io::stdin().read_line(&mut command).unwrap();
+        let parts: Vec<&str> = command.trim().split_whitespace().collect();
+
+        // Processa os comandos do usuário
+        match parts.as_slice() {
+            ["chat"] => {
+                // Implementação do chat peer-to-peer
+                println!("Digite o endereço do peer destinatário (ex: 127.0.0.1:8000): ");
+                let mut recipient_address = String::new();
+                io::stdin().read_line(&mut recipient_address).unwrap();
+                let recipient_address = recipient_address.trim();
+            
+                println!("Digite sua mensagem: ");
+                let mut message = String::new();
+                io::stdin().read_line(&mut message).unwrap();
+                let message = message.trim();
+            
+                // Cria e envia a mensagem
+                let chat_message = chat::ChatMessage {
+                    sender: name.clone(),
+                    message: message.to_string(),
+                    timestamp: chat::current_timestamp(),
+                };
+            
+                if let Err(e) = chat::send_chat_message(recipient_address, chat_message).await {
+                    println!("❌ Erro ao enviar a mensagem: {}", e);
+                }
+            }
+            
+            // Comando para compartilhar arquivo (sem nome do arquivo)
+            ["share"] => {
+                println!("Digite o nome do arquivo para compartilhar:");
+                let mut file_name = String::new();
+                io::stdin().read_line(&mut file_name).unwrap();
+                let file_name = file_name.trim();
+
+                if file_name.is_empty() {
+                    println!("❌ Nome do arquivo inválido.");
+                } else if let Err(e) = register_chunks(&name, &address, file_name).await {
+                    println!("❌ Erro ao compartilhar arquivo '{}': {}", file_name, e);
+                }
+            }
+
+            // Comando para compartilhar arquivo (com nome do arquivo)
+            ["share", file] => {
+                if let Err(e) = register_chunks(&name, &address, file).await {
+                    println!("❌ Erro ao compartilhar arquivo '{}': {}", file, e);
+                }
+            }
+
+            // Comando para baixar arquivo (sem nome do arquivo)
+            ["get"] => {
+                println!("Digite o nome do arquivo que deseja baixar:");
+                let mut file_name = String::new();
+                io::stdin().read_line(&mut file_name).unwrap();
+                let file_name = file_name.trim();
+
+                if file_name.is_empty() {
+                    println!("❌ Nome do arquivo inválido.");
+                } else {
+                    download_and_register(&name, &address, file_name).await;
+                }
+            }
+
+            // Comando para baixar arquivo (com nome do arquivo)
+            ["get", file] => {
+                download_and_register(&name, &address, file).await;
+            }
+
+            // Comando para listar peers e arquivos
+            ["list"] => {
+                if let Err(e) = list_peers().await {
+                    println!("❌ Erro ao listar peers: {}", e);
+                }
+            }
+
+            // Comando para sair do programa
+            ["exit"] => {
+                println!("👋 Saindo...");
+                if let Err(e) = unregister_peer(&name).await {
+                    println!("❌ Erro ao remover peer: {}", e);
+                }
+                break;
+            }
+            
+            // Comando inválido
+            _ => println!("❌ Comando inválido!"),
+        }
+    }
 }
