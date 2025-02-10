@@ -1,4 +1,4 @@
-﻿# AluBox - Sistema P2P de Compartilhamento de Arquivos e Chat
+﻿# Sistema P2P-Compartilhamento de Arquivos
 
 ## 📋 Descrição
 
