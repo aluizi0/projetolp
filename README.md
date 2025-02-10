@@ -2,7 +2,7 @@
 
 ## 📋 Descrição
 
-AluBox é um sistema P2P desenvolvido em Rust que permite compartilhar e baixar arquivos em uma rede P2P, além de oferecer um sistema de chat entre peers.
+Desenvolvimento de um sistema P2P em Rust que permite compartilhar e baixar arquivos em uma rede P2P, além de oferecer outros incentivos como interações com chat.
 
 ## 🚀 Funcionalidades
 
