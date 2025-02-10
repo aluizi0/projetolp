@@ -2,7 +2,32 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 use tokio::net::TcpListener;
 use serde::{Serialize, Deserialize};
+use tower_http::cors::{CorsLayer, Any};
+use std::process::Command;
 
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PeerStartRequest {
+    name: String,
+}
+
+async fn start_peer(Json(payload): Json<PeerStartRequest>) -> StatusCode {
+    println!("🟢 Iniciando peer '{}'", payload.name);
+
+    // Inicia o peer como um processo separado
+    let result = Command::new("cargo")
+        .arg("run")
+        .arg("--bin")
+        .arg("peer")
+        .arg("--")
+        .arg(&payload.name)
+        .spawn();
+
+    match result {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Peer {
@@ -219,6 +244,7 @@ pub async fn start_tracker() {
     });
 
     let app = Router::new()
+        .route("/start_peer", post(start_peer)) // 🔹 Nova rota para iniciar peers
         .route("/register", post(register_peer))
         .route("/heartbeat", post(heartbeat))
         .route("/register_chunk", post(register_chunks))
@@ -226,10 +252,13 @@ pub async fn start_tracker() {
         .route("/list", get(list_peers))
         .route("/unregister_file", post(unregister_file))
         .route("/unregister_peer", post(unregister_peer))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)  // 🔥 Permite qualquer origem (frontend pode chamar)
+                .allow_methods(Any)  // 🔥 Permite todos os métodos (POST, GET, etc.)
+                .allow_headers(Any), // 🔥 Permite todos os headers
+        )
         .with_state(state.clone());
-        
-
-
 
     let listener = TcpListener::bind("0.0.0.0:9500").await.unwrap();
     println!("📡 Tracker rodando na porta 9500...");
