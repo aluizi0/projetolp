@@ -47,6 +47,7 @@ Saída esperada:
 Na pasta frontend
 ```sh
 # WebSite
+npm install
 npm run dev
 ```
 
