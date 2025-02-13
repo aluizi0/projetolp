@@ -79,11 +79,20 @@ pub fn assemble_file(original_file_name: &str) {
         println!("✅ Arquivo '{}' reconstituído com sucesso!", output_file_name);
 
         let assembled_checksum = compute_file_checksum(&output_file_name);
-        println!("🔍 Checksum do arquivo reconstruído: {}", assembled_checksum);
+        let original_checksum = compute_file_checksum(original_file_name);
 
-        // Se o checksum for válido, renomeamos o arquivo para o nome original
-        fs::rename(&output_file_name, original_file_name).expect("Erro ao renomear arquivo");
-        println!("✅ O arquivo foi validado e renomeado corretamente para '{}'", original_file_name);
+        println!("🔍 Checksum do arquivo reconstruído: {}", assembled_checksum);
+        println!("🔍 Checksum esperado: {}", original_checksum);
+
+        if assembled_checksum == original_checksum {
+            // ✅ Checksum bate -> renomeamos para o nome original
+            fs::rename(&output_file_name, original_file_name).expect("Erro ao renomear arquivo");
+            println!("✅ O arquivo foi validado e renomeado corretamente para '{}'", original_file_name);
+        } else {
+            // ❌ Checksum não bate -> avisa que o arquivo pode estar corrompido
+            println!("❌ ERRO: O arquivo reconstruído '{}' está corrompido!", output_file_name);
+            println!("   O checksum não corresponde ao arquivo original.");
+        }
     } else {
         println!("⚠️ Nenhum chunk encontrado para reconstrução!");
     }
