@@ -10,7 +10,8 @@ use std::io::{Read, Write}; // Leitura e escrita de arquivos
 use tokio::time::{self, Duration}; // Utilitários para tempo e delays assíncronos
 use axum::routing::{get, post}; // Rotas HTTP para interações P2P
 use rand::prelude::SliceRandom; // Escolha aleatória de peers ao baixar arquivos
-// Removida a importação não utilizada: use tokio::task;
+use rfd::FileDialog;
+use std::path::Path;
 
 use crate::chat;
 use crate::file_utils::{split_file, assemble_file, compute_file_checksum};
@@ -77,8 +78,57 @@ async fn register_peer(name: &str, address: &str) -> bool {
     }
 }
 
+
+fn select_file() -> Option<String> {
+    FileDialog::new()
+        .set_title("Selecione um arquivo para compartilhar")
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+
+/// **Copia um arquivo para o diretório do peer**
+fn copy_file_to_peer_directory(file_path: &str) -> Option<String> {
+    let path = Path::new(file_path);
+
+    if let Some(file_name) = path.file_name() {
+        let destination = format!("./{}", file_name.to_string_lossy());
+
+        if let Err(e) = fs::copy(file_path, &destination) {
+            println!("❌ Erro ao copiar arquivo: {}", e);
+            return None;
+        }
+
+        println!("📂 Arquivo copiado para '{}'", destination);
+        return Some(destination);
+    }
+
+    None
+}
+
+
+
 /// Registra chunks de arquivos no Tracker
-async fn register_chunks(peer_name: &str, peer_address: &str, file_name: &str) -> Result<(), Box<dyn Error>> {
+/// **Registra um arquivo a partir de qualquer diretório**
+async fn register_chunks(peer_name: &str, peer_address: &str, file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Copia o arquivo para o diretório do peer antes de processá-lo
+    let local_file_path = match copy_file_to_peer_directory(file_path) {
+        Some(path) => path,
+        None => {
+            println!("❌ Falha ao copiar arquivo '{}'", file_path);
+            return Ok(());
+        }
+    };
+
+    // Obtém apenas o nome do arquivo, sem o caminho absoluto
+    let file_name = Path::new(&local_file_path)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    println!("📂 Processando '{}'", file_name);
+
     let client = Client::new();
     
     // Verifica se o arquivo já está registrado no Tracker
@@ -88,36 +138,32 @@ async fn register_chunks(peer_name: &str, peer_address: &str, file_name: &str) -
     if res.status().is_success() {
         let list: Vec<PeerInfo> = res.json().await?;
         for peer_info in list {
-            if peer_info.name == peer_name {
-                if peer_info.files.contains(&file_name.to_string()) {
-                    println!("⚠️ O arquivo '{}' já está registrado no Tracker. Ignorando...", file_name);
-                    return Ok(()); // Se o arquivo já está registrado, não faz nada
-                }
-                break;
+            if peer_info.name == peer_name && peer_info.files.contains(&file_name) {
+                println!("⚠️ O arquivo '{}' já está registrado no Tracker. Ignorando...", file_name);
+                return Ok(());
             }
         }
     }
 
     // Divide o arquivo em chunks
-    let chunks = split_file(file_name);
+    let chunks = split_file(&file_name);
     if chunks.is_empty() {
         println!("❌ Nenhum chunk foi criado para '{}'. Verifique se o arquivo existe.", file_name);
         return Ok(());
     }
 
-    // Registra cada chunk no Tracker, validando o checksum antes
+    // Registra cada chunk no Tracker
     for (_, chunk_name, expected_checksum) in &chunks {
-        // Calcula o checksum real do chunk antes de registrá-lo
         let computed_checksum = compute_file_checksum(chunk_name);
         if computed_checksum != *expected_checksum {
             println!("❌ Erro: Checksum inválido para '{}'. Chunk corrompido.", chunk_name);
-            continue; // Se o checksum não bate, não registra o chunk
+            continue;
         }
 
         let chunk_data = ChunkRegister {
             peer: peer_name.to_string(),
             peer_address: peer_address.to_string(),
-            file_name: file_name.to_string(),
+            file_name: file_name.clone(), // 🔹 Apenas o nome do arquivo, sem caminho absoluto
             chunk_name: chunk_name.to_string(),
             checksum: expected_checksum.to_string(),
         };
@@ -136,6 +182,7 @@ async fn register_chunks(peer_name: &str, peer_address: &str, file_name: &str) -
 
     Ok(())
 }
+
 
 
 /// Obtém a lista de chunks disponíveis no tracker
@@ -571,26 +618,19 @@ pub async fn start_peer() {
                 }
             }
             
-            // Comando para compartilhar arquivo (sem nome do arquivo)
+            // Comando para compartilhar arquivo 
             ["share"] => {
-                println!("Digite o nome do arquivo para compartilhar:");
-                let mut file_name = String::new();
-                io::stdin().read_line(&mut file_name).unwrap();
-                let file_name = file_name.trim();
-
-                if file_name.is_empty() {
-                    println!("❌ Nome do arquivo inválido.");
-                } else if let Err(e) = register_chunks(&name, &address, file_name).await {
-                    println!("❌ Erro ao compartilhar arquivo '{}': {}", file_name, e);
+                // Abre o explorador de arquivos para seleção
+                if let Some(file_path) = select_file() {
+                    println!("📂 Arquivo selecionado: {}", file_path);
+                    if let Err(e) = register_chunks(&name, &address, &file_path).await {
+                        println!("❌ Erro ao compartilhar arquivo '{}': {}", file_path, e);
+                    }
+                } else {
+                    println!("⚠️ Nenhum arquivo foi selecionado.");
                 }
             }
-
-            // Comando para compartilhar arquivo (com nome do arquivo)
-            ["share", file] => {
-                if let Err(e) = register_chunks(&name, &address, file).await {
-                    println!("❌ Erro ao compartilhar arquivo '{}': {}", file, e);
-                }
-            }
+            
 
             // Comando para baixar arquivo (sem nome do arquivo)
             ["get"] => {

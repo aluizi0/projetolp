@@ -13,4 +13,4 @@ sha2 = "0.10"        # Biblioteca para calcular SHA-256
 rand = "0.8"
 futures = "0.3"
 tower-http = { version = "0.5", features = ["cors"] }
-
+rfd = "0.12" # Versão mais recente da Rust File Dialog
