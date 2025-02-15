@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7"         # Framework para servidor HTTP
+axum = { version = "0.7", features = ["multipart"] } # ✅ Habilita suporte a arquivos
 tokio = { version = "1", features = ["full"] }  # Runtime assíncrono
 serde = { version = "1", features = ["derive"] } # Serialização de JSON
 serde_json = "1.0"   # Manipulação de JSON

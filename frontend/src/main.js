@@ -23,7 +23,7 @@ const TRACKER_URL = "http://127.0.0.1:9500";
 // 🔹 Garante que o usuário inicie na tela de registro
 document.addEventListener("DOMContentLoaded", async () => {
     const storedName = localStorage.getItem("peerName");
-    const storedAddress = localStorage.getItem("peerAddress"); // Obtém o endereço do Peer
+    const storedAddress = localStorage.getItem("peerAddress");
 
     if (storedName && storedAddress) {
         startSession(storedName, storedAddress);
@@ -62,15 +62,15 @@ registerBtn.addEventListener("click", async () => {
     registerBtn.disabled = true;
 
     try {
-        // 🔹 Gera uma porta aleatória para o Peer (entre 8000 e 9000)
+        // 🔹 Gera uma porta aleatória entre 8000 e 9000
         const peerPort = Math.floor(Math.random() * 1000) + 8000;
         const peerAddress = `127.0.0.1:${peerPort}`;
 
-        // 🔹 Primeiro, registra o Peer no Tracker com nome e endereço
+        // 🔹 Registra o Peer no Tracker com nome e endereço
         const res = await fetch(`${TRACKER_URL}/register`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: peerName, address: peerAddress }), // ✅ Agora inclui `address`
+            body: JSON.stringify({ name: peerName, address: peerAddress }),
         });
 
         if (!res.ok) {
@@ -81,7 +81,7 @@ registerBtn.addEventListener("click", async () => {
         // 🔹 Aguarda um curto período para garantir que o Tracker atualizou a lista
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // 🔹 Agora, buscamos o endereço correto do Peer no Tracker
+        // 🔹 Obtém o endereço atualizado do Peer
         const peerRes = await fetch(`${TRACKER_URL}/list`);
         const peers = await peerRes.json();
         const peer = peers.find(p => p.name === peerName);
@@ -92,7 +92,7 @@ registerBtn.addEventListener("click", async () => {
 
         const peerFullAddress = `http://${peer.address}`;
         localStorage.setItem("peerName", peerName);
-        localStorage.setItem("peerAddress", peerFullAddress); // ✅ Agora salva o endereço real do Peer
+        localStorage.setItem("peerAddress", peerFullAddress);
 
         startSession(peerName, peerFullAddress);
     } catch (error) {
@@ -139,21 +139,28 @@ fileInput.addEventListener("change", async () => {
     const file = fileInput.files[0];
     console.log("📂 Arquivo selecionado:", file.name);
 
-    const peerAddress = localStorage.getItem("peerAddress"); // Obtém o endereço correto
+    const peerAddress = localStorage.getItem("peerAddress");
     if (!peerAddress) {
         alert("⚠️ Erro: Endereço do Peer não encontrado!");
         return;
     }
 
     try {
+        console.log(`📡 Enviando arquivo para ${peerAddress}/share`);
+
+        // Criando um FormData para envio do arquivo
+        const formData = new FormData();
+        formData.append("file", file, file.name);
+
         const response = await fetch(`${peerAddress}/share`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ file_name: file.name }),
+            body: formData,
         });
 
         if (!response.ok) {
-            throw new Error(`Erro ao compartilhar arquivo: ${response.statusText}`);
+            const errorText = await response.text();
+            console.error("❌ Erro ao compartilhar arquivo:", errorText);
+            throw new Error(`Erro ao compartilhar: ${errorText}`);
         }
 
         alert("✅ Arquivo compartilhado com sucesso!");
@@ -185,7 +192,7 @@ exitBtn.addEventListener("click", async () => {
         console.error("❌ Erro ao se desconectar do Tracker:", error);
     }
 
-    // 🔹 Remove o nome salvo e volta para a tela inicial
+    // 🔹 Remove os dados salvos e volta para a tela inicial
     localStorage.removeItem("peerName");
     localStorage.removeItem("peerAddress");
     registerScreen.classList.remove("hidden");

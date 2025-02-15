@@ -10,23 +10,25 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("Uso: cargo run -- (tracker | peer)");
+        eprintln!("❌ Uso: cargo run -- (tracker | peer)");
         return;
     }
 
     let mode = args[1].as_str();
 
+    let rt = Runtime::new().expect("❌ Falha ao iniciar o runtime do Tokio");
+
     match mode {
         "tracker" => {
-            let rt = Runtime::new().unwrap();
-            rt.block_on(tracker::start_tracker());
+            println!("🚀 Iniciando Tracker...");
+            rt.block_on(tracker::start_tracker()); // ❌ REMOVIDO `if let Err(e) =`
         }
         "peer" => {
-            let rt = Runtime::new().unwrap();
-            rt.block_on(peer::start_peer());
+            println!("📡 Iniciando Peer...");
+            rt.block_on(peer::start_peer()); // ❌ REMOVIDO `if let Err(e) =`
         }
         _ => {
-            println!("Modo inválido! Use 'tracker' ou 'peer'.");
+            eprintln!("❌ Modo inválido! Use 'tracker' ou 'peer'.");
         }
     }
 }
