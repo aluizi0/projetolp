@@ -14,6 +14,7 @@ use rfd::FileDialog;
 use std::path::Path;
 use axum::extract::Multipart;
 
+
 use crate::chat;
 use crate::file_utils::{split_file, assemble_file, compute_file_checksum};
 
@@ -25,13 +26,14 @@ struct RegisterRequest {
 }
 
 // Estrutura para registrar chunks de arquivos
-#[derive(Debug, Serialize, Deserialize)]
+
+#[derive(Debug, Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
 struct ChunkRegister {
-    peer: String,          // Nome do peer que possui o chunk
-    file_name: String,     // Nome do arquivo original
-    chunk_name: String,    // Nome do chunk específico
-    checksum: String,      // Checksum para verificação de integridade
-    peer_address: String,  // Endereço do peer que possui o chunk
+    peer: String,
+    file_name: String,
+    chunk_name: String,
+    checksum: String,
+    peer_address: String,
 }
 
 // Estado compartilhado do peer
@@ -90,12 +92,24 @@ fn select_file() -> Option<String> {
 
 /// **Copia um arquivo para o diretório do peer**
 fn copy_file_to_peer_directory(file_path: &str) -> Option<String> {
-    let path = Path::new(file_path);
+    let path = std::path::Path::new(file_path);
 
     if let Some(file_name) = path.file_name() {
         let destination = format!("./{}", file_name.to_string_lossy());
 
-        if let Err(e) = fs::copy(file_path, &destination) {
+        // 🚀 Verifica se o arquivo original já existe
+        if std::path::Path::new(&destination).exists() {
+            println!("⚠️ Arquivo '{}' já existe. Pulando cópia.", destination);
+            return Some(destination);
+        }
+
+        // 🚀 Se o arquivo não existir, evita erro de cópia
+        if !std::path::Path::new(file_path).exists() {
+            println!("❌ Arquivo '{}' não encontrado para cópia!", file_path);
+            return None;
+        }
+
+        if let Err(e) = std::fs::copy(file_path, &destination) {
             println!("❌ Erro ao copiar arquivo: {}", e);
             return None;
         }
@@ -106,7 +120,6 @@ fn copy_file_to_peer_directory(file_path: &str) -> Option<String> {
 
     None
 }
-
 
 
 /// Registra chunks de arquivos no Tracker
@@ -229,24 +242,31 @@ async fn list_peers() -> Result<(), Box<dyn Error>> {
 /// Baixa os chunks diretamente dos peers e os salva localmente
 /// Baixa os chunks diretamente dos peers e os salva localmente.
 /// Agora, ele continua tentando até baixar todos os chunks necessários.
-async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Baixa os chunks diretamente dos peers e os salva localmente.
+/// Agora evita baixar de si mesmo e distribui melhor os downloads.
+async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str, self_address: &str) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let mut chunk_map: HashMap<String, Vec<ChunkRegister>> = HashMap::new();
 
-    // Agrupa os chunks pelo nome para saber quais peers possuem quais partes
+    // 🔹 Agrupa os chunks pelo nome para saber quais peers possuem cada parte
     for chunk in chunks {
-        chunk_map.entry(chunk.chunk_name.clone()).or_default().push(chunk);
+        if chunk.peer_address != self_address { // 🚀 Evita baixar de si mesmo
+            chunk_map.entry(chunk.chunk_name.clone()).or_default().push(chunk);
+        }
     }
 
     let mut missing_chunks: HashSet<String> = chunk_map.keys().cloned().collect();
-    
+
     while !missing_chunks.is_empty() {
         let mut tasks: Vec<tokio::task::JoinHandle<Result<String, (String, String)>>> = vec![];
 
         for chunk_name in missing_chunks.clone() {
             if let Some(chunk_peers) = chunk_map.get_mut(&chunk_name) {
-                // Escolhe um peer aleatório entre os que ainda possuem o chunk
-                if let Some(selected_peer) = chunk_peers.choose(&mut rand::thread_rng()) {
+                // 🔹 Embaralha a lista de peers para distribuir melhor o download
+                let mut rng = rand::thread_rng();
+                chunk_peers.shuffle(&mut rng);
+
+                if let Some(selected_peer) = chunk_peers.pop() { // 🚀 Escolhe um peer diferente a cada tentativa
                     let chunk_name_clone = chunk_name.clone();
                     let peer_address = selected_peer.peer_address.clone();
                     let checksum = selected_peer.checksum.clone();
@@ -255,20 +275,27 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<
                     tasks.push(tokio::spawn(async move {
                         let chunk_url = format!("http://{}/get_chunk?name={}", peer_address, chunk_name_clone);
                         println!("⬇️ Tentando baixar chunk '{}' de '{}'", chunk_name_clone, peer_address);
-                    
+
                         match client_clone.get(&chunk_url).send().await {
                             Ok(res) if res.status().is_success() => {
                                 let bytes = res.bytes().await.unwrap();
                                 let mut file = File::create(&chunk_name_clone).unwrap();
                                 file.write_all(&bytes).unwrap();
-                    
+
                                 let downloaded_checksum = compute_file_checksum(&chunk_name_clone);
                                 if downloaded_checksum != checksum {
-                                    println!("❌ Checksum inválido para '{}'. Excluindo chunk corrompido.", chunk_name_clone);
-                                    std::fs::remove_file(&chunk_name_clone).unwrap();
-                                    return Err((chunk_name_clone, peer_address)); // Retorna o chunk e o peer que falhou
+                                    println!("❌ Checksum inválido para '{}'. Chunk corrompido.", chunk_name_clone);
+                                    println!("🔍 Checksum esperado: {}", checksum);
+                                    println!("🔍 Checksum recebido: {}", downloaded_checksum);
+                                    
+                                    // Remove o chunk corrompido para evitar reconstrução incorreta
+                                    if let Err(e) = std::fs::remove_file(&chunk_name_clone) {
+                                        println!("⚠️ Erro ao remover chunk corrompido '{}': {}", chunk_name_clone, e);
+                                    }
+
+                                    return Err((chunk_name_clone, peer_address)); // Retorna erro para tentar outro peer
                                 }
-                    
+
                                 println!("✅ Chunk '{}' baixado com sucesso!", chunk_name_clone);
                                 Ok(chunk_name_clone) // Indica sucesso no download
                             }
@@ -285,11 +312,11 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<
         for result in results {
             match result {
                 Ok(Ok(chunk_name)) => {
-                    missing_chunks.remove(&chunk_name); // Remove da lista de chunks pendentes
+                    missing_chunks.remove(&chunk_name); // ✅ Remove da lista de chunks pendentes
                 }
                 Ok(Err((chunk_name, failed_peer))) => {
                     println!("❌ Falha ao baixar '{}'. Removendo '{}' da lista de peers válidos.", chunk_name, failed_peer);
-                    // Remove o peer que falhou da lista de peers disponíveis para esse chunk
+                    // ❌ Remove o peer que falhou da lista de peers disponíveis para esse chunk
                     if let Some(peers) = chunk_map.get_mut(&chunk_name) {
                         peers.retain(|peer| peer.peer_address != failed_peer);
                     }
@@ -300,7 +327,7 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<
 
         if !missing_chunks.is_empty() {
             println!("🔄 Alguns chunks falharam no download. Tentando novamente...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // Pequeno delay antes de tentar novamente
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // ⏳ Pequeno delay antes de tentar novamente
         }
     }
 
@@ -310,6 +337,7 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str) -> Result<
 
     Ok(())
 }
+
 
 async fn upload_file(mut multipart: Multipart) -> Result<String, StatusCode> {
     while let Some(field) = multipart.next_field().await.unwrap() {
@@ -348,9 +376,40 @@ async fn send_chunk(
 async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &str) {
     println!("🔄 Buscando chunks de '{}'...", file_name);
     match get_chunks(file_name).await {
-        Ok(chunks) if chunks.is_empty() => println!("⚠️ Nenhum chunk encontrado."),
+        Ok(chunks) if chunks.is_empty() => {
+            println!("⚠️ Nenhum chunk encontrado.");
+            return;
+        }
+
         Ok(chunks) => {
-            if let Err(e) = download_chunks(chunks, file_name).await {
+            let mut missing_chunks: HashSet<ChunkRegister> = HashSet::new();
+
+            // 🚀 **Verifica quais chunks já estão no diretório**
+            let local_chunks: HashSet<String> = fs::read_dir(".")
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
+                .filter(|name| name.starts_with(file_name) && name.contains(".chunk"))
+                .collect();
+
+            println!("📂 Chunks locais encontrados: {:?}", local_chunks);
+
+            // Filtra apenas os chunks que ainda não estão no diretório
+            for chunk in &chunks {
+                if !local_chunks.contains(&chunk.chunk_name) {
+                    missing_chunks.insert(chunk.clone());
+                }
+            }
+
+            if missing_chunks.is_empty() {
+                println!("✅ Você já possui todos os chunks de '{}'. Tentando reconstrução...", file_name);
+                assemble_file(file_name);
+                return;
+            }
+
+            println!("📥 Chunks faltando: {:?}", missing_chunks.iter().map(|c| &c.chunk_name).collect::<Vec<_>>());
+
+            if let Err(e) = download_chunks(missing_chunks.into_iter().collect(), file_name, peer_address).await {
                 println!("❌ Erro ao baixar chunks: {}", e);
             } else {
                 println!("✅ Download concluído e arquivo reconstruído!");
@@ -360,9 +419,11 @@ async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &
                 }
             }
         }
+
         Err(e) => println!("❌ Erro ao buscar arquivo '{}': {}", file_name, e),
     }
 }
+
 
 /// Monitor de arquivos deletados
 async fn monitor_deleted_files(peer_name: String) {
@@ -402,12 +463,14 @@ async fn monitor_deleted_files(peer_name: String) {
 }
 
 #[allow(dead_code)]
+/// Monitora e remove chunks ausentes do tracker
 async fn monitor_lost_chunks(peer_name: String) {
     loop {
-        time::sleep(Duration::from_secs(10)).await;
+        time::sleep(Duration::from_secs(10)).await; // Executa a cada 10 segundos
 
-        // Lista todos os arquivos no diretório
         let mut current_chunks: HashSet<String> = HashSet::new();
+
+        // 🔍 Lista os chunks que realmente existem no diretório do peer
         if let Ok(entries) = fs::read_dir(".") {
             for entry in entries.flatten() {
                 if let Some(file_name) = entry.file_name().to_str() {
@@ -418,7 +481,7 @@ async fn monitor_lost_chunks(peer_name: String) {
             }
         }
 
-        // Obtém do Tracker quais chunks esse Peer deveria ter
+        // 🔍 Pede ao Tracker a lista de chunks que ele acha que esse peer tem
         let client = Client::new();
         let url = format!("http://127.0.0.1:9500/get_peer_chunks?peer={}", peer_name);
         let res = client.get(&url).send().await;
@@ -430,6 +493,7 @@ async fn monitor_lost_chunks(peer_name: String) {
                 for chunk in expected_chunks {
                     if !current_chunks.contains(&chunk) {
                         println!("🚨 Chunk '{}' foi perdido! Removendo do Tracker...", chunk);
+                        
                         let payload = serde_json::json!({ "peer": peer_name, "chunk": chunk });
                         let _ = client.post("http://127.0.0.1:9500/unregister_chunk")
                             .json(&payload)
@@ -441,6 +505,7 @@ async fn monitor_lost_chunks(peer_name: String) {
         }
     }
 }
+
 
 
 /// Remove um arquivo do tracker

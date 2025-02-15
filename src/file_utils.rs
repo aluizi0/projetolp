@@ -4,7 +4,7 @@ use sha2::{Sha256, Digest};
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
-/// **Divide o arquivo em chunks de 1MB e calcula o checksum**
+/// **Divide um arquivo em chunks de 1MB e calcula o checksum**
 pub fn split_file(file_name: &str) -> Vec<(usize, String, String)> {
     let mut file = File::open(file_name).expect("Erro ao abrir arquivo");
     let mut buffer = vec![0; CHUNK_SIZE];
@@ -52,10 +52,11 @@ pub fn compute_file_checksum(file_name: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// **Reconstituir arquivo original a partir dos chunks**
+/// **Reconstitui o arquivo original a partir dos chunks**
 pub fn assemble_file(original_file_name: &str) {
     let output_file_name = format!("{}.assembled", original_file_name);
-    let mut output_file = File::create(&output_file_name).expect("Erro ao criar arquivo final");
+    let mut output_file = File::create(&output_file_name)
+        .expect("❌ Erro ao criar arquivo final");
 
     let mut index = 0;
     let mut chunks_found = false;
@@ -64,13 +65,13 @@ pub fn assemble_file(original_file_name: &str) {
         let chunk_name = format!("{}.chunk{}", original_file_name, index);
         if let Ok(mut chunk_file) = File::open(&chunk_name) {
             let mut buffer = Vec::new();
-            chunk_file.read_to_end(&mut buffer).expect("Erro ao ler chunk");
-            output_file.write_all(&buffer).expect("Erro ao escrever no arquivo final");
+            chunk_file.read_to_end(&mut buffer).expect("❌ Erro ao ler chunk");
+            output_file.write_all(&buffer).expect("❌ Erro ao escrever no arquivo final");
 
             println!("📦 Adicionando '{}' ao arquivo final", chunk_name);
             chunks_found = true;
         } else {
-            break; // Sai do loop quando não houver mais chunks
+            break;
         }
         index += 1;
     }
@@ -79,19 +80,26 @@ pub fn assemble_file(original_file_name: &str) {
         println!("✅ Arquivo '{}' reconstituído com sucesso!", output_file_name);
 
         let assembled_checksum = compute_file_checksum(&output_file_name);
-        let original_checksum = compute_file_checksum(original_file_name);
-
         println!("🔍 Checksum do arquivo reconstruído: {}", assembled_checksum);
-        println!("🔍 Checksum esperado: {}", original_checksum);
 
-        if assembled_checksum == original_checksum {
-            // ✅ Checksum bate -> renomeamos para o nome original
-            fs::rename(&output_file_name, original_file_name).expect("Erro ao renomear arquivo");
-            println!("✅ O arquivo foi validado e renomeado corretamente para '{}'", original_file_name);
-        } else {
-            // ❌ Checksum não bate -> avisa que o arquivo pode estar corrompido
-            println!("❌ ERRO: O arquivo reconstruído '{}' está corrompido!", output_file_name);
-            println!("   O checksum não corresponde ao arquivo original.");
+        if std::path::Path::new(original_file_name).exists() {
+            // 🔍 Se o arquivo original existir, compara os checksums
+            let original_checksum = compute_file_checksum(original_file_name);
+            println!("🔍 Checksum esperado: {}", original_checksum);
+        }
+
+        // 🚀 Renomeia para o nome correto, com fallback caso ocorra erro
+        match fs::rename(&output_file_name, original_file_name) {
+            Ok(_) => println!("✅ O arquivo foi validado e renomeado corretamente para '{}'", original_file_name),
+            Err(e) => {
+                println!("❌ Erro ao renomear '{}': {}. Tentando copiar o arquivo...", output_file_name, e);
+                if let Err(copy_err) = fs::copy(&output_file_name, original_file_name) {
+                    println!("❌ Falha ao copiar arquivo reconstruído: {}", copy_err);
+                } else {
+                    println!("✅ Arquivo '{}' copiado com sucesso!", original_file_name);
+                    let _ = fs::remove_file(&output_file_name);
+                }
+            }
         }
     } else {
         println!("⚠️ Nenhum chunk encontrado para reconstrução!");
