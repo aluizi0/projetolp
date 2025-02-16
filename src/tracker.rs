@@ -290,3 +290,7 @@ pub async fn start_tracker() {
     println!("📡 Tracker rodando na porta 9500...");
     axum::serve(listener, app).await.unwrap();
 }
+
+
+
+

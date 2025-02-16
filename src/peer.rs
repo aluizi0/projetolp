@@ -341,7 +341,7 @@ async fn download_chunks(
 
                     tasks.push(tokio::spawn(async move {
                         let chunk_url = format!("http://{}/get_chunk?name={}", peer_address, chunk_name_clone);
-                        println!("⬇️ Baixando chunk '{}' de '{}'", chunk_name_clone, peer_address);
+                        //println!("⬇️ Baixando chunk '{}' de '{}'", chunk_name_clone, peer_address);
 
                         match timeout(Duration::from_secs(5), client_clone.get(&chunk_url).send()).await {
                             Ok(Ok(res)) if res.status().is_success() => {
@@ -360,7 +360,7 @@ async fn download_chunks(
                                     return Err((chunk_name_clone, peer_address));
                                 }
 
-                                println!("✅ Chunk '{}' baixado com sucesso! ({} KB)", chunk_name_clone, size / 1024);
+                                //println!("✅ Chunk '{}' baixado com sucesso! ({} KB)", chunk_name_clone, size / 1024);
                                 Ok((chunk_name_clone, size)) // Retorna o tamanho baixado
                             }
                             Ok(_) => {
@@ -396,7 +396,7 @@ async fn download_chunks(
         }
 
         if !missing_chunks.is_empty() {
-            println!("🔄 Alguns chunks falharam no download. Tentando novamente...");
+            //println!("🔄 Alguns chunks falharam no download. Tentando novamente...");
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
@@ -405,8 +405,17 @@ async fn download_chunks(
     let duration = start_time.elapsed().as_secs_f64();
     let speed_kb_s = (total_downloaded_bytes as f64 / 1024.0) / duration;
     
-    println!("✅ Todos os chunks foram baixados!");
-    println!("🔄 Tentando reconstruir o arquivo original '{}'", file_name);
+    println!("
+    ==================================
+    ✅ Todos os chunks foram baixados!
+    ==================================
+    ");
+
+    println!("
+    ========================================================
+    🔄 Tentando reconstruir o arquivo original '{}'
+    ========================================================
+    ", file_name);
     assemble_file(file_name);
 
     println!(
@@ -483,7 +492,11 @@ async fn download_and_register(
             if let Err(e) = download_chunks(missing_chunks.into_iter().collect(), file_name, peer_address, max_connections).await {
                 println!("❌ Erro ao baixar chunks: {}", e);
             } else {
-                println!("✅ Download concluído e arquivo reconstruído!");
+                println!("
+                ================================================
+                ✅ Download concluído e arquivo reconstruído!
+                ================================================
+                ");
                 println!("📢 Registrando automaticamente o arquivo baixado...");
                 if let Err(e) = register_chunks(peer_name, peer_address, file_name).await {
                     println!("❌ Erro ao registrar '{}': {}", file_name, e);
@@ -497,41 +510,6 @@ async fn download_and_register(
 
 
 /// Monitor de arquivos deletados
-async fn monitor_deleted_files(peer_name: String) {
-    loop {
-        time::sleep(Duration::from_secs(1)).await;
-
-        // Verifica arquivos atuais no diretório
-        if let Ok(entries) = fs::read_dir(".") {
-            let current_files: Vec<String> = entries
-                .flatten()
-                .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
-                .collect();
-
-            // Verifica arquivos registrados no tracker
-            let client = Client::new();
-            let url = "http://127.0.0.1:9500/list".to_string();
-            let res = client.get(&url).send().await;
-
-            if let Ok(response) = res {
-                if response.status().is_success() {
-                    let list: std::collections::HashMap<String, Vec<String>> = response.json().await.unwrap_or_default();
-
-                    if let Some(files) = list.get(&peer_name) {
-                        for file in files {
-                            if !current_files.contains(file) {
-                                println!("🚨 O arquivo '{}' foi deletado! Removendo do Tracker...", file);
-                                if let Err(e) = unregister_file(&peer_name, file).await {
-                                    println!("❌ Erro ao remover '{}': {}", file, e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 #[allow(dead_code)]
 /// Monitora e remove chunks ausentes do tracker
@@ -695,7 +673,6 @@ pub async fn start_peer() {
     tokio::spawn(send_heartbeat(name.clone()));
 
     // Inicia os monitores de arquivos em background
-    tokio::spawn(monitor_deleted_files(name.clone()));
     tokio::spawn(monitor_missing_files(name.clone())); 
 
     // Configura o estado compartilhado do peer
