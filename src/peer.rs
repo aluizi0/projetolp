@@ -12,11 +12,14 @@ use axum::routing::{get, post}; // Rotas HTTP para interações P2P
 use rand::prelude::SliceRandom; // Escolha aleatória de peers ao baixar arquivos
 use rfd::FileDialog;
 use std::path::Path;
-use axum::extract::Multipart;
-
+use tokio::time::timeout;
+use tokio::time::sleep;
+use std::time::Instant;
 
 use crate::chat;
 use crate::file_utils::{split_file, assemble_file, compute_file_checksum};
+
+
 
 // Estrutura para registrar um novo peer no tracker
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +80,30 @@ async fn register_peer(name: &str, address: &str) -> bool {
         _ => {
             println!("❌ Nome de usuário já está em uso. Escolha outro.");
             false
+        }
+    }
+}
+
+/// **Envia heartbeat para o Tracker a cada 60 segundos**
+async fn send_heartbeat(peer_name: String) {
+    let client = Client::new();
+    let url = "http://127.0.0.1:9500/heartbeat".to_string();
+
+    loop {
+        sleep(Duration::from_secs(60)).await; // Espera 60 segundos antes de enviar o próximo heartbeat
+
+        let res = client.post(&url)
+            .json(&peer_name)
+            .send()
+            .await;
+
+        match res {
+            Ok(response) if response.status().is_success() => {
+                println!("💓 Heartbeat enviado para o Tracker!");
+            }
+            _ => {
+                println!("❌ Falha ao enviar heartbeat para o Tracker!");
+            }
         }
     }
 }
@@ -214,6 +241,36 @@ async fn get_chunks(file_name: &str) -> Result<Vec<ChunkRegister>, Box<dyn Error
     }
 }
 
+/// Conta quantos chunks este peer tem no diretório
+fn count_local_chunks() -> usize {
+    let mut chunk_count = 0;
+
+    if let Ok(entries) = fs::read_dir(".") {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.file_name().to_str() {
+                if file_name.contains(".chunk") {
+                    chunk_count += 1;
+                }
+            }
+        }
+    }
+
+    chunk_count
+}
+
+/// Define o número máximo de conexões com base nos chunks disponíveis
+fn determine_max_connections() -> usize {
+    let chunk_count = count_local_chunks();
+
+    match chunk_count {
+        0..=4 => 1,    // Apenas 1 conexão paralela
+        5..=9 => 2,    // Máximo de 2 conexões
+        10..=14 => 3,  // Máximo de 3 conexões
+        _ => 4,        // Máximo permitido (4)
+    }
+}
+
+
 /// Lista todos os peers e arquivos disponíveis na rede
 async fn list_peers() -> Result<(), Box<dyn Error>> {
     let client = Client::new();
@@ -244,29 +301,39 @@ async fn list_peers() -> Result<(), Box<dyn Error>> {
 /// Agora, ele continua tentando até baixar todos os chunks necessários.
 /// Baixa os chunks diretamente dos peers e os salva localmente.
 /// Agora evita baixar de si mesmo e distribui melhor os downloads.
-async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str, self_address: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn download_chunks(
+    chunks: Vec<ChunkRegister>,
+    file_name: &str,
+    self_address: &str,
+    max_connections: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
+    let max_connections = max_connections.clamp(1, 4);
     let mut chunk_map: HashMap<String, Vec<ChunkRegister>> = HashMap::new();
+    let mut total_downloaded_bytes = 0; // Armazena o total de bytes baixados
 
-    // 🔹 Agrupa os chunks pelo nome para saber quais peers possuem cada parte
+    // 🔹 Agrupa os chunks pelo nome
     for chunk in chunks {
-        if chunk.peer_address != self_address { // 🚀 Evita baixar de si mesmo
+        if chunk.peer_address != self_address {
             chunk_map.entry(chunk.chunk_name.clone()).or_default().push(chunk);
         }
     }
 
     let mut missing_chunks: HashSet<String> = chunk_map.keys().cloned().collect();
+    
+    // 🚀 Inicia o cronômetro antes do download
+    let start_time = Instant::now();
 
     while !missing_chunks.is_empty() {
-        let mut tasks: Vec<tokio::task::JoinHandle<Result<String, (String, String)>>> = vec![];
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<(String, usize), (String, String)>>> = vec![];
+        let chunks_to_process: Vec<_> = missing_chunks.iter().cloned().collect();
 
-        for chunk_name in missing_chunks.clone() {
-            if let Some(chunk_peers) = chunk_map.get_mut(&chunk_name) {
-                // 🔹 Embaralha a lista de peers para distribuir melhor o download
+        for chunk_name in chunks_to_process.iter().take(max_connections) {
+            if let Some(chunk_peers) = chunk_map.get_mut(chunk_name) {
                 let mut rng = rand::thread_rng();
                 chunk_peers.shuffle(&mut rng);
 
-                if let Some(selected_peer) = chunk_peers.pop() { // 🚀 Escolhe um peer diferente a cada tentativa
+                if let Some(selected_peer) = chunk_peers.pop() {
                     let chunk_name_clone = chunk_name.clone();
                     let peer_address = selected_peer.peer_address.clone();
                     let checksum = selected_peer.checksum.clone();
@@ -274,32 +341,36 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str, self_addre
 
                     tasks.push(tokio::spawn(async move {
                         let chunk_url = format!("http://{}/get_chunk?name={}", peer_address, chunk_name_clone);
-                        println!("⬇️ Tentando baixar chunk '{}' de '{}'", chunk_name_clone, peer_address);
+                        println!("⬇️ Baixando chunk '{}' de '{}'", chunk_name_clone, peer_address);
 
-                        match client_clone.get(&chunk_url).send().await {
-                            Ok(res) if res.status().is_success() => {
+                        match timeout(Duration::from_secs(5), client_clone.get(&chunk_url).send()).await {
+                            Ok(Ok(res)) if res.status().is_success() => {
                                 let bytes = res.bytes().await.unwrap();
+                                let size = bytes.len(); // Obtém o tamanho do chunk baixado
+                                
                                 let mut file = File::create(&chunk_name_clone).unwrap();
                                 file.write_all(&bytes).unwrap();
 
                                 let downloaded_checksum = compute_file_checksum(&chunk_name_clone);
                                 if downloaded_checksum != checksum {
                                     println!("❌ Checksum inválido para '{}'. Chunk corrompido.", chunk_name_clone);
-                                    println!("🔍 Checksum esperado: {}", checksum);
-                                    println!("🔍 Checksum recebido: {}", downloaded_checksum);
-                                    
-                                    // Remove o chunk corrompido para evitar reconstrução incorreta
                                     if let Err(e) = std::fs::remove_file(&chunk_name_clone) {
                                         println!("⚠️ Erro ao remover chunk corrompido '{}': {}", chunk_name_clone, e);
                                     }
-
-                                    return Err((chunk_name_clone, peer_address)); // Retorna erro para tentar outro peer
+                                    return Err((chunk_name_clone, peer_address));
                                 }
 
-                                println!("✅ Chunk '{}' baixado com sucesso!", chunk_name_clone);
-                                Ok(chunk_name_clone) // Indica sucesso no download
+                                println!("✅ Chunk '{}' baixado com sucesso! ({} KB)", chunk_name_clone, size / 1024);
+                                Ok((chunk_name_clone, size)) // Retorna o tamanho baixado
                             }
-                            _ => Err((chunk_name_clone, peer_address)), // Se falhar, retorna o nome do chunk e o peer que falhou
+                            Ok(_) => {
+                                println!("❌ Falha ao baixar '{}'. Tentando outro peer...", chunk_name_clone);
+                                Err((chunk_name_clone, peer_address))
+                            }
+                            Err(_) => {
+                                println!("⏳ Timeout ao baixar '{}'.", chunk_name_clone);
+                                Err((chunk_name_clone, peer_address))
+                            }
                         }
                     }));
                 }
@@ -308,15 +379,14 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str, self_addre
 
         let results = futures::future::join_all(tasks).await;
 
-        // Processa os resultados
         for result in results {
             match result {
-                Ok(Ok(chunk_name)) => {
-                    missing_chunks.remove(&chunk_name); // ✅ Remove da lista de chunks pendentes
+                Ok(Ok((chunk_name, size))) => {
+                    missing_chunks.remove(&chunk_name);
+                    total_downloaded_bytes += size; // Soma o tamanho dos chunks baixados
                 }
                 Ok(Err((chunk_name, failed_peer))) => {
-                    println!("❌ Falha ao baixar '{}'. Removendo '{}' da lista de peers válidos.", chunk_name, failed_peer);
-                    // ❌ Remove o peer que falhou da lista de peers disponíveis para esse chunk
+                    println!("❌ Falha ao baixar '{}'. Removendo peer '{}'.", chunk_name, failed_peer);
                     if let Some(peers) = chunk_map.get_mut(&chunk_name) {
                         peers.retain(|peer| peer.peer_address != failed_peer);
                     }
@@ -327,31 +397,29 @@ async fn download_chunks(chunks: Vec<ChunkRegister>, file_name: &str, self_addre
 
         if !missing_chunks.is_empty() {
             println!("🔄 Alguns chunks falharam no download. Tentando novamente...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // ⏳ Pequeno delay antes de tentar novamente
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
 
+    // 🚀 Fim do cronômetro
+    let duration = start_time.elapsed().as_secs_f64();
+    let speed_kb_s = (total_downloaded_bytes as f64 / 1024.0) / duration;
+    
     println!("✅ Todos os chunks foram baixados!");
     println!("🔄 Tentando reconstruir o arquivo original '{}'", file_name);
     assemble_file(file_name);
+
+    println!(
+        "📊 Velocidade média do download: {:.2} KB/s ({:.2} MB/s)",
+        speed_kb_s,
+        speed_kb_s / 1024.0
+    );
 
     Ok(())
 }
 
 
-async fn upload_file(mut multipart: Multipart) -> Result<String, StatusCode> {
-    while let Some(field) = multipart.next_field().await.unwrap() {
-        let file_name = field.file_name().unwrap().to_string();
-        let data = field.bytes().await.unwrap();
 
-        let file_path = Path::new("./").join(&file_name);
-        let mut file = File::create(&file_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        file.write_all(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        println!("📂 Arquivo '{}' salvo!", file_name);
-    }
-    Ok("✅ Arquivo recebido!".to_string())
-}
 
 
 /// Servidor que permite que outros peers baixem chunks deste peer
@@ -373,7 +441,12 @@ async fn send_chunk(
 }
 
 /// Função auxiliar para download e registro automático de arquivos
-async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &str) {
+async fn download_and_register(
+    peer_name: &str, 
+    peer_address: &str, 
+    file_name: &str,
+    max_connections: usize
+) {
     println!("🔄 Buscando chunks de '{}'...", file_name);
     match get_chunks(file_name).await {
         Ok(chunks) if chunks.is_empty() => {
@@ -384,7 +457,6 @@ async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &
         Ok(chunks) => {
             let mut missing_chunks: HashSet<ChunkRegister> = HashSet::new();
 
-            // 🚀 **Verifica quais chunks já estão no diretório**
             let local_chunks: HashSet<String> = fs::read_dir(".")
                 .unwrap()
                 .flatten()
@@ -394,7 +466,6 @@ async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &
 
             println!("📂 Chunks locais encontrados: {:?}", local_chunks);
 
-            // Filtra apenas os chunks que ainda não estão no diretório
             for chunk in &chunks {
                 if !local_chunks.contains(&chunk.chunk_name) {
                     missing_chunks.insert(chunk.clone());
@@ -409,7 +480,7 @@ async fn download_and_register(peer_name: &str, peer_address: &str, file_name: &
 
             println!("📥 Chunks faltando: {:?}", missing_chunks.iter().map(|c| &c.chunk_name).collect::<Vec<_>>());
 
-            if let Err(e) = download_chunks(missing_chunks.into_iter().collect(), file_name, peer_address).await {
+            if let Err(e) = download_chunks(missing_chunks.into_iter().collect(), file_name, peer_address, max_connections).await {
                 println!("❌ Erro ao baixar chunks: {}", e);
             } else {
                 println!("✅ Download concluído e arquivo reconstruído!");
@@ -620,6 +691,9 @@ pub async fn start_peer() {
         return;
     }
 
+    // ✅ Inicia o envio de heartbeats a cada 60 segundos
+    tokio::spawn(send_heartbeat(name.clone()));
+
     // Inicia os monitores de arquivos em background
     tokio::spawn(monitor_deleted_files(name.clone()));
     tokio::spawn(monitor_missing_files(name.clone())); 
@@ -714,22 +788,40 @@ pub async fn start_peer() {
 
             // Comando para baixar arquivo (sem nome do arquivo)
             ["get"] => {
+                let max_allowed = determine_max_connections();
+            
+                println!("🔄 Você tem {} chunks. Seu limite de conexões paralelas é: {}", count_local_chunks(), max_allowed);
                 println!("Digite o nome do arquivo que deseja baixar:");
+            
                 let mut file_name = String::new();
                 io::stdin().read_line(&mut file_name).unwrap();
-                let file_name = file_name.trim();
-
+                let file_name = file_name.trim().to_string();
+            
                 if file_name.is_empty() {
                     println!("❌ Nome do arquivo inválido.");
-                } else {
-                    download_and_register(&name, &address, file_name).await;
+                    return;
                 }
+            
+                let chosen_connections; // 🔄 Declara sem inicializar
+            
+                loop {
+                    println!("Digite o número de conexões paralelas (1-{}):", max_allowed);
+                    let mut connections = String::new();
+                    io::stdin().read_line(&mut connections).unwrap();
+            
+                    match connections.trim().parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= max_allowed => {
+                            chosen_connections = n; // ✅ Agora é inicializado corretamente antes do uso
+                            break;
+                        }
+                        _ => println!("⚠️ Número inválido! Digite um número entre 1 e {}.", max_allowed),
+                    }
+                }
+            
+                println!("🔄 Iniciando download com {} conexões paralelas...", chosen_connections);
+                download_and_register(&name, &address, &file_name, chosen_connections).await;
             }
-
-            // Comando para baixar arquivo (com nome do arquivo)
-            ["get", file] => {
-                download_and_register(&name, &address, file).await;
-            }
+            
 
             // Comando para listar peers e arquivos
             ["list"] => {

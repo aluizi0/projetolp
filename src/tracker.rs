@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use serde::{Serialize, Deserialize};
 use tower_http::cors::{CorsLayer, Any};
 use std::process::Command;
+use tokio::time::{self, Duration};
 
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -181,26 +182,48 @@ async fn unregister_file(
 /// **Recebe heartbeat dos peers ativos**
 async fn heartbeat(
     State(state): State<SharedState>,
-    Json(peer_name): Json<String>,  // 🔹 Agora aceita uma string simples
-) -> StatusCode {
+    Json(peer_name): Json<String>, // Recebe apenas o nome do peer
+) -> axum::http::StatusCode {
     let mut peers = state.peers.lock().unwrap();
+    let now = current_timestamp();
 
     if let Some(peer) = peers.get_mut(&peer_name) {
-        peer.last_seen = current_timestamp();
-        println!("💓 Heartbeat recebido de '{}' (último visto: {}s)", peer_name, peer.last_seen);
-        return StatusCode::OK;
+        peer.last_seen = now;
+        println!("💓 Heartbeat recebido de '{}' (última atividade: {}s)", peer_name, now);
+        return axum::http::StatusCode::OK;
     }
 
-    println!("❌ Peer '{}' tentou enviar heartbeat, mas não foi encontrado no Tracker!", peer_name);
-    StatusCode::NOT_FOUND
+    println!("❌ Peer '{}' tentou enviar heartbeat, mas não está registrado!", peer_name);
+    axum::http::StatusCode::NOT_FOUND
 }
 
+async fn cleanup_peers(state: SharedState) {
+    loop {
+        time::sleep(Duration::from_secs(180)).await; // Executa a cada 3 minutos
+        let mut peers = state.peers.lock().unwrap();
+        let now = current_timestamp();
+
+        let removed_peers: Vec<String> = peers.iter()
+            .filter(|(_, peer)| now - peer.last_seen >= 180)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        peers.retain(|_, peer| now - peer.last_seen < 180);
+
+        if !removed_peers.is_empty() {
+            println!("🧹 Removendo peers inativos: {:?}", removed_peers);
+        }
+    }
+}
+
+/// **Obtém o timestamp atual**
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
+
 
 async fn unregister_peer(
     State(state): State<SharedState>,
@@ -243,10 +266,13 @@ pub async fn start_tracker() {
         chunks: Mutex::new(HashMap::new()),
     });
 
+    // 🔹 Inicia a limpeza automática de peers inativos
+    tokio::spawn(cleanup_peers(state.clone()));
+
     let app = Router::new()
-        .route("/start_peer", post(start_peer)) // 🔹 Nova rota para iniciar peers
+        .route("/start_peer", post(start_peer)) 
         .route("/register", post(register_peer))
-        .route("/heartbeat", post(heartbeat))
+        .route("/heartbeat", post(heartbeat)) 
         .route("/register_chunk", post(register_chunks))
         .route("/get_file_chunks", get(get_file_chunks))
         .route("/list", get(list_peers))
@@ -254,9 +280,9 @@ pub async fn start_tracker() {
         .route("/unregister_peer", post(unregister_peer))
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)  // 🔥 Permite qualquer origem (frontend pode chamar)
-                .allow_methods(Any)  // 🔥 Permite todos os métodos (POST, GET, etc.)
-                .allow_headers(Any), // 🔥 Permite todos os headers
+                .allow_origin(Any) 
+                .allow_methods(Any)  
+                .allow_headers(Any),
         )
         .with_state(state.clone());
 
